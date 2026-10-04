@@ -13,6 +13,13 @@ function App() {
       tg.ready();
       tg.expand();
 
+      // На компьютере expand() не влияет на размер окна — просим полноэкранный режим (Bot API 8.0+).
+      // На телефоне не включаем, там достаточно expand().
+      const isDesktop = ['tdesktop', 'macos', 'web', 'weba', 'webk'].includes(tg.platform);
+      if (isDesktop && tg.isVersionAtLeast('8.0') && !tg.isFullscreen) {
+        tg.requestFullscreen();
+      }
+
       if (tg.initDataUnsafe.user) {
         setUser(tg.initDataUnsafe.user);
         setDebugMessage("Подключено! Игрок: " + tg.initDataUnsafe.user.first_name);
@@ -83,24 +90,24 @@ function App() {
     <div style={{ textAlign: 'center', padding: '20px', fontFamily: 'sans-serif' }}>
       <h1>ZNS Mini App</h1>
       
-      <p style={{ color: '#444', background: '#eee', padding: '8px', borderRadius: '5px', fontSize: '14px' }}>
+      <p style={{ color: 'var(--hint)', background: 'var(--secondary-bg)', padding: '8px', borderRadius: '5px', fontSize: '14px' }}>
         <b>Статус:</b> {debugMessage}
       </p>
 
       {user ? (
-        <div style={{ border: '1px solid #ccc', padding: '15px', borderRadius: '10px', background: '#f9f9f9', marginTop: '15px' }}>
+        <div style={{ border: '1px solid var(--secondary-bg)', padding: '15px', borderRadius: '10px', background: 'var(--secondary-bg)', marginTop: '15px' }}>
           <p>Привет, <b>{user.first_name}</b>!</p>
           <p>Твой Telegram ID: <code>{user.id}</code></p>
           <button 
             onClick={sendDataToGoogleSheets} 
-            style={{ padding: '12px 24px', fontSize: '16px', background: '#0088cc', color: '#fff', border: 'none', borderRadius: '5px', cursor: 'pointer', marginTop: '10px' }}
+            style={{ padding: '12px 24px', fontSize: '16px', background: 'var(--tg-theme-button-color, #0088cc)', color: 'var(--tg-theme-button-text-color, #fff)', border: 'none', borderRadius: '5px', cursor: 'pointer', marginTop: '10px' }}
           >
             Отправить данные в таблицу
           </button>
         </div>
       ) : (
         <div style={{ marginTop: '20px' }}>
-          <button onClick={checkTelegramEnv} style={{ padding: '8px 16px', fontSize: '12px', background: '#bbb', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
+          <button onClick={checkTelegramEnv} style={{ padding: '8px 16px', fontSize: '12px', background: 'var(--secondary-bg)', color: 'var(--text)', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
             🔄 Перепроверить окружение
           </button>
         </div>
