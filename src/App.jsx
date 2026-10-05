@@ -1,10 +1,36 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { GOOGLE_SCRIPT_URL } from './config.js';
+import { useSheets } from './data/useSheets.js';
+import { buildModel } from './data/model.js';
+import { HomePage } from './pages/HomePage.jsx';
+import { CompetitionsPage } from './pages/CompetitionsPage.jsx';
+import { AthletesPage } from './pages/AthletesPage.jsx';
+import { WeaponsPage } from './pages/WeaponsPage.jsx';
+import { ApplicationsPage } from './pages/ApplicationsPage.jsx';
+import './App.css';
 
-const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxLCEk-qSvy3ZDf6A15TOT7rIQOrtfRfVbRQvh3X907Trjh6PojNBA7HryTZEXu60cxxw/exec';
+// Разделы нижнего меню
+const PAGES = [
+  { id: 'home', icon: '🏠', label: 'Главная', component: HomePage },
+  { id: 'competitions', icon: '🏆', label: 'Соревнования', component: CompetitionsPage },
+  { id: 'athletes', icon: '👤', label: 'Спортсмены', component: AthletesPage },
+  { id: 'weapons', icon: '🎯', label: 'Оружие', component: WeaponsPage },
+  { id: 'applications', icon: '📝', label: 'Заявки', component: ApplicationsPage },
+];
+
+// Начальный раздел можно задать в адресе: ?page=weapons
+const initialPage = () => {
+  const fromUrl = new URLSearchParams(location.search).get('page');
+  return PAGES.some((p) => p.id === fromUrl) ? fromUrl : 'home';
+};
 
 function App() {
   const [user, setUser] = useState(null);
   const [debugMessage, setDebugMessage] = useState("Ожидание Telegram...");
+  const [page, setPage] = useState(initialPage);
+  // Листы таблицы загружаются один раз на всё приложение и доступны всем страницам
+  const sheets = useSheets();
+  const model = useMemo(() => buildModel(sheets.data), [sheets.data]);
 
   const checkTelegramEnv = () => {
     // Проверяем наличие глобального объекта Telegram
@@ -34,13 +60,13 @@ function App() {
   useEffect(() => {
     // Проверяем сразу
     if (checkTelegramEnv()) return;
-    
+
     // Если не нашли, проверяем КАЖДУЮ секунду в течение 10 секунд
     let secondsPassed = 0;
     const interval = setInterval(() => {
       secondsPassed++;
       const found = checkTelegramEnv();
-      
+
       if (found) {
         clearInterval(interval);
       } else if (secondsPassed >= 10) { // Даем смартфону целых 10 секунд на прогрузку скрипта Telegram
@@ -51,6 +77,23 @@ function App() {
 
     return () => clearInterval(interval);
   }, []);
+
+  // Кнопка «Назад» Telegram: на любой странице, кроме главной, возвращает на главную
+  useEffect(() => {
+    const backButton = window.Telegram?.WebApp?.BackButton;
+    if (!backButton || !window.Telegram.WebApp.isVersionAtLeast('6.1')) return;
+
+    const goHome = () => setPage('home');
+    if (page === 'home') backButton.hide();
+    else backButton.show();
+    backButton.onClick(goHome);
+    return () => backButton.offClick(goHome);
+  }, [page]);
+
+  const openPage = (next) => {
+    setPage(next);
+    window.scrollTo(0, 0);
+  };
 
 
   const sendDataToGoogleSheets = async () => {
@@ -86,32 +129,41 @@ function App() {
     }
   };
 
-  return (
-    <div style={{ textAlign: 'center', padding: '20px', fontFamily: 'sans-serif' }}>
-      <h1>ZNS Mini App</h1>
-      
-      <p style={{ color: 'var(--hint)', background: 'var(--secondary-bg)', padding: '8px', borderRadius: '5px', fontSize: '14px' }}>
-        <b>Статус:</b> {debugMessage}
-      </p>
+  const Page = PAGES.find((p) => p.id === page).component;
 
-      {user ? (
-        <div style={{ border: '1px solid var(--secondary-bg)', padding: '15px', borderRadius: '10px', background: 'var(--secondary-bg)', marginTop: '15px' }}>
-          <p>Привет, <b>{user.first_name}</b>!</p>
-          <p>Твой Telegram ID: <code>{user.id}</code></p>
-          <button 
-            onClick={sendDataToGoogleSheets} 
-            style={{ padding: '12px 24px', fontSize: '16px', background: 'var(--tg-theme-button-color, #0088cc)', color: 'var(--tg-theme-button-text-color, #fff)', border: 'none', borderRadius: '5px', cursor: 'pointer', marginTop: '10px' }}
-          >
-            Отправить данные в таблицу
-          </button>
+  return (
+    <div className="app">
+      <main className="page">
+        {page !== 'home' && sheets.loading && !sheets.data && <p className="sheet-meta">Загрузка таблицы…</p>}
+        {page !== 'home' && sheets.error && <p className="sheet-error">Не удалось загрузить таблицу: {sheets.error}</p>}
+
+        <Page
+          model={model}
+          sheets={sheets}
+          user={user}
+          telegramStatus={debugMessage}
+          onOpenPage={openPage}
+          onRecheckTelegram={checkTelegramEnv}
+          onSendTest={sendDataToGoogleSheets}
+        />
+
+        <p className="build-info">Версия от {__BUILD_TIME__}</p>
+      </main>
+
+      <nav className="bottom-nav">
+        <div className="bottom-nav-inner">
+          {PAGES.map((item) => (
+            <button
+              key={item.id}
+              className={item.id === page ? 'nav-item active' : 'nav-item'}
+              onClick={() => openPage(item.id)}
+            >
+              <span className="nav-icon">{item.icon}</span>
+              <span className="nav-label">{item.label}</span>
+            </button>
+          ))}
         </div>
-      ) : (
-        <div style={{ marginTop: '20px' }}>
-          <button onClick={checkTelegramEnv} style={{ padding: '8px 16px', fontSize: '12px', background: 'var(--secondary-bg)', color: 'var(--text)', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
-            🔄 Перепроверить окружение
-          </button>
-        </div>
-      )}
+      </nav>
     </div>
   );
 }
