@@ -4,11 +4,55 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ZNS 23</title>
-    <script type="module" crossorigin src="/zns_mgssk_bot/assets/index-CcJ-68MD.js"></script>
-    <link rel="stylesheet" crossorigin href="/zns_mgssk_bot/assets/index-bQjaFHuS.css">
+    <script>
+      // Страховка от пустого экрана — работает до загрузки бандла, поэтому написана на старом JS.
+      // 1) Telegram мог закэшировать index.html, ссылающийся на бандл, который уже удалён
+      //    при деплое (404) — тогда один раз перезагружаемся в обход кэша.
+      // 2) Если бандл упал с ошибкой и ничего не отрисовалось — показываем ошибку на экране.
+      (function () {
+        var FLAG = 'zns-asset-reload';
+        function storage(fn) { try { return fn(window.sessionStorage); } catch (e) { return null; } }
+        function showError(text) {
+          // React размонтирует дерево после ошибки рендера не сразу — проверяем чуть позже
+          setTimeout(function () {
+            var root = document.getElementById('root');
+            if (!root || root.childNodes.length) return;
+            root.innerHTML = '<div style="padding:20px;font:14px sans-serif;color:#c33;white-space:pre-wrap"></div>';
+            root.firstChild.textContent = 'Ошибка запуска приложения:\n' + text;
+          }, 100);
+        }
+
+        window.addEventListener('error', function (e) {
+          var el = e.target;
+          if (el && el !== window && (el.tagName === 'SCRIPT' || el.tagName === 'LINK')) {
+            if (!storage(function (s) { return s.getItem(FLAG); })) {
+              storage(function (s) { s.setItem(FLAG, '1'); });
+              location.replace(location.pathname + '?v=' + Date.now() + location.hash);
+            } else {
+              showError('не удалось загрузить ' + (el.src || el.href));
+            }
+            return;
+          }
+          showError((e.message || 'неизвестная ошибка') + (e.filename ? '\n' + e.filename + ':' + e.lineno : ''));
+        }, true);
+
+        window.addEventListener('unhandledrejection', function (e) {
+          showError(String(e.reason && (e.reason.stack || e.reason.message) || e.reason));
+        });
+
+        // Успешно загрузились — сбрасываем флаг, чтобы при следующем деплое перезагрузка снова сработала
+        window.addEventListener('load', function () {
+          setTimeout(function () {
+            var root = document.getElementById('root');
+            if (root && root.childNodes.length) storage(function (s) { s.removeItem(FLAG); });
+          }, 3000);
+        });
+      })();
+    </script>
+    <script type="module" crossorigin src="/zns_mgssk_bot/assets/index-DbxfP8YV.js"></script>
+    <link rel="stylesheet" crossorigin href="/zns_mgssk_bot/assets/index-ZiEQThVB.css">
   </head>
   <body>
     <div id="root"></div>
-    <!-- СТРОКА НИЖЕ ДОЛЖНА БЫТЬ ЧИСТОЙ, БЕЗ ЗНАКОВ ВОПРОСА: -->
   </body>
 </html>
