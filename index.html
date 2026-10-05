@@ -8,19 +8,31 @@
       // Страховка от пустого экрана — работает до загрузки бандла, поэтому написана на старом JS.
       // 1) Telegram мог закэшировать index.html, ссылающийся на бандл, который уже удалён
       //    при деплое (404) — тогда один раз перезагружаемся в обход кэша.
-      // 2) Если бандл упал с ошибкой и ничего не отрисовалось — показываем ошибку на экране.
+      // 2) Если бандл упал с ошибкой или не запустился за BOOT_TIMEOUT_MS — показываем причину на экране.
       (function () {
         var FLAG = 'zns-asset-reload';
+        var BOOT_TIMEOUT_MS = 15000;
         function storage(fn) { try { return fn(window.sessionStorage); } catch (e) { return null; } }
+
+        // Приложение отрисовалось, если в #root есть что-то кроме экрана загрузки
+        function appMounted() {
+          var root = document.getElementById('root');
+          return !!root && root.childNodes.length > 0 && !document.getElementById('boot');
+        }
+
         function showError(text) {
           // React размонтирует дерево после ошибки рендера не сразу — проверяем чуть позже
           setTimeout(function () {
+            if (appMounted()) return;
             var root = document.getElementById('root');
-            if (!root || root.childNodes.length) return;
-            root.innerHTML = '<div style="padding:20px;font:14px sans-serif;color:#c33;white-space:pre-wrap"></div>';
-            root.firstChild.textContent = 'Ошибка запуска приложения:\n' + text;
+            if (!root) return;
+            root.innerHTML = '<div id="boot" style="padding:20px;font:14px sans-serif;color:#c33;background:#fff;white-space:pre-wrap;word-break:break-all"></div>';
+            root.firstChild.textContent = 'Ошибка запуска приложения:\n' + text +
+              '\n\nАдрес: ' + location.origin + location.pathname +
+              '\nБраузер: ' + navigator.userAgent;
           }, 100);
         }
+        window.__znsShowError = showError;
 
         window.addEventListener('error', function (e) {
           var el = e.target;
@@ -40,19 +52,26 @@
           showError(String(e.reason && (e.reason.stack || e.reason.message) || e.reason));
         });
 
-        // Успешно загрузились — сбрасываем флаг, чтобы при следующем деплое перезагрузка снова сработала
         window.addEventListener('load', function () {
+          // Успешно загрузились — сбрасываем флаг, чтобы при следующем деплое перезагрузка снова сработала
           setTimeout(function () {
-            var root = document.getElementById('root');
-            if (root && root.childNodes.length) storage(function (s) { s.removeItem(FLAG); });
+            if (appMounted()) storage(function (s) { s.removeItem(FLAG); });
           }, 3000);
         });
+
+        // Ни ошибки, ни отрисовки — бандл не выполнился (например, очень старый WebView)
+        setTimeout(function () {
+          if (!appMounted()) showError('приложение не запустилось за ' + BOOT_TIMEOUT_MS / 1000 + ' с');
+        }, BOOT_TIMEOUT_MS);
       })();
     </script>
-    <script type="module" crossorigin src="/zns_mgssk_bot/assets/index-COcKe2Rc.js"></script>
+    <script type="module" crossorigin src="/zns_mgssk_bot/assets/index-B5KHq6rE.js"></script>
     <link rel="stylesheet" crossorigin href="/zns_mgssk_bot/assets/index-ZiEQThVB.css">
   </head>
   <body>
-    <div id="root"></div>
+    <!-- Экран загрузки виден сразу, без JS; React заменит его приложением -->
+    <div id="root"><div id="boot" style="padding:40px 20px;text-align:center;font:16px sans-serif;color:#555">Загрузка приложения…</div></div>
+    <!-- Браузер без поддержки ES-модулей не запустит бандл вообще -->
+    <script nomodule>window.__znsShowError('браузер не поддерживает ES-модули — обновите Telegram / Android System WebView');</script>
   </body>
 </html>
