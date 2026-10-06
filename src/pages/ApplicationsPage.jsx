@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { APPLICATION_STATUS, findMyAthlete } from '../data/model.js';
 import { deleteApplication } from '../data/applications.js';
-import { Badge, EmptyState, PageHeader, SearchInput, confirmAction, formatDateTime, formatRange, matches } from '../components.jsx';
+import { Badge, EmptyState, PageHeader, SearchInput, ShowMore, confirmAction, formatDateTime, formatRange, usePaged } from '../components.jsx';
+import { fuzzySearch } from '../data/search.js';
 
 const STATUS_TONE = {
   [APPLICATION_STATUS.new]: 'accent',
@@ -17,9 +18,12 @@ export function ApplicationsPage({ model, user, sheets, onOpenPage, onMessage })
   const [deleting, setDeleting] = useState(null);
 
   const mine = me ? model.applications.filter((a) => a.createdById === me.id) : [];
-  const list = mine.filter((a) =>
-    matches(query, a.number, a.fullName, a.weapon, a.competitionTitle, a.ekpNumber, a.address, a.status, a.transport),
+  // Поиск с опечатками, в другой раскладке и транслитом
+  const list = fuzzySearch(mine, query, (a) =>
+    [a.number, a.competitionTitle, a.ekpNumber, a.address, a.status, ...a.weaponLines, ...a.transportList].join(' '),
   );
+  // Порциями по экрану (карточка заявки ~280px)
+  const paged = usePaged(list, 280, query);
 
   const remove = async (application) => {
     const ok = await confirmAction(`Удалить заявку № ${application.number}? Она будет перенесена в архив.`);
@@ -65,7 +69,7 @@ export function ApplicationsPage({ model, user, sheets, onOpenPage, onMessage })
           )}
           {mine.length > 0 && list.length === 0 && <EmptyState icon="📝" title="Ничего не найдено" />}
 
-          {list.map((a, i) => (
+          {paged.visible.map((a, i) => (
             <div key={a.number || i} className="card item-card">
               <div className="item-head">
                 <div className="item-title">
@@ -110,6 +114,7 @@ export function ApplicationsPage({ model, user, sheets, onOpenPage, onMessage })
               )}
             </div>
           ))}
+          <ShowMore paged={paged} />
         </>
       )}
     </>

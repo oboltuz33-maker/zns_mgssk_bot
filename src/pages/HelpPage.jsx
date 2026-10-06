@@ -48,10 +48,13 @@ export function HelpPage({ model, me, sheets, user, telegramStatus }) {
       <div className="card item-card">
         <div className="section-label">Если что-то не так</div>
         <p className="item-row">
-          Нажмите «🔄 Обновить» внизу этой страницы — данные подгрузятся из таблицы заново (сами они
+          Нажмите «🔄 Обновить» ниже — данные подгрузятся из таблицы заново (сами они
           обновляются при открытии приложения, если с прошлой загрузки прошло больше 10 минут). Если не помогло, обратитесь к
-          администратору клуба и сообщите версию приложения и ваш Telegram ID (они ниже).
+          администратору и сообщите версию приложения и ваш Telegram ID (они ниже).
         </p>
+        <div className="help-refresh">
+          <DataStatus sheets={sheets} />
+        </div>
       </div>
 
       <div className="card item-card">
@@ -74,9 +77,6 @@ export function HelpPage({ model, me, sheets, user, telegramStatus }) {
         )}
       </div>
 
-      <div className="page-footer">
-        <DataStatus sheets={sheets} />
-      </div>
     </>
   );
 }

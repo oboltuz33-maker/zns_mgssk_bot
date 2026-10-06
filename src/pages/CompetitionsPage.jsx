@@ -1,31 +1,28 @@
 import { useState } from 'react';
-import { competitionStatus, findMyAthlete } from '../data/model.js';
+import { findMyAthlete, isUpcomingCompetition, moscowDay } from '../data/model.js';
 import { applicationsForCompetition } from '../data/applications.js';
-import { Badge, Chips, EmptyState, PageHeader, SearchInput, formatRange, matches } from '../components.jsx';
+import { Badge, EmptyState, PageHeader, SearchInput, ShowMore, formatCompetitionDates, usePaged } from '../components.jsx';
+import { fuzzySearch } from '../data/search.js';
 
-const STATUS_BADGE = {
-  upcoming: { tone: 'accent', label: 'Предстоит' },
-  ongoing: { tone: 'success', label: 'Идёт сейчас' },
-  past: { tone: 'muted', label: 'Завершено' },
+// Номер дня по московскому календарю — чтобы считать «через сколько дней» без влияния часового пояса телефона
+const dayNumber = (date) => Math.round(Date.parse(moscowDay(date)) / 86_400_000);
+
+const untilText = (start) => {
+  const days = dayNumber(start) - dayNumber(new Date());
+  if (days <= 0) return 'сегодня';
+  if (days === 1) return 'завтра';
+  return `через ${days} дн.`;
 };
-
-const daysUntil = (date) => Math.ceil((date - new Date()) / 86_400_000);
 
 // onApply — кнопка «Подать заявку» (передаётся только перевозчикам).
 // existing — уже поданные заявки перевозчика на это соревнование: вместо «Подать заявку» показываются они
 export function CompetitionCard({ competition, onApply, existing = [], onOpenApplications }) {
-  const status = competitionStatus(competition);
-  const badge = STATUS_BADGE[status];
-  const days = status === 'upcoming' && competition.start ? daysUntil(competition.start) : null;
-
   return (
-    <div className={status === 'past' ? 'card item-card is-past' : 'card item-card'}>
-      <div className="item-head">
-        <div className="item-title">{competition.title}</div>
-        <Badge tone={badge.tone}>{badge.label}</Badge>
-      </div>
-      <div className="item-row">📅 {formatRange(competition.start, competition.end)}
-        {days !== null && <span className="item-hint"> · через {days} дн.</span>}
+    <div className="card item-card">
+      <div className="item-title">{competition.title}</div>
+      <div className="item-row">
+        📅 {formatCompetitionDates(competition)}
+        {competition.start && <span className="item-hint"> · {untilText(competition.start)}</span>}
       </div>
       {competition.address && <div className="item-row">📍 {competition.address}</div>}
       <div className="item-tags">
@@ -41,8 +38,7 @@ export function CompetitionCard({ competition, onApply, existing = [], onOpenApp
           ))}
         </div>
       ) : (
-        onApply &&
-        status !== 'past' && (
+        onApply && (
           <div className="card-actions">
             <button className="primary-button" onClick={() => onApply(competition)}>
               📝 Подать заявку
@@ -54,46 +50,39 @@ export function CompetitionCard({ competition, onApply, existing = [], onOpenApp
   );
 }
 
+// Раздел «Соревнования»: только предстоящие — Apps Script других не отдаёт (прошедшие переносятся в архив),
+// а здесь они дополнительно отсеиваются на случай данных, сохранённых на устройстве до начала соревнования
 export function CompetitionsPage({ model, user, onOpenPage }) {
   const me = findMyAthlete(model, user);
   const onApply = me?.isCarrier ? (c) => onOpenPage('application-form', { competitionId: c.id }) : undefined;
-  const [filter, setFilter] = useState('active');
   const [query, setQuery] = useState('');
 
-  const isActive = (c) => competitionStatus(c) !== 'past';
-  const groups = {
-    active: model.competitions.filter(isActive),
-    past: model.competitions.filter((c) => !isActive(c)).reverse(),
-    all: model.competitions,
-  };
-  const list = groups[filter].filter((c) => matches(query, c.title, c.kind, c.address, c.ekpNumber));
+  const upcoming = model.competitions.filter((c) => isUpcomingCompetition(c));
+  // Поиск с опечатками, в другой раскладке и транслитом
+  const list = fuzzySearch(upcoming, query, (c) => [c.title, c.kind, c.address, c.ekpNumber].join(' '));
+  // Порциями по экрану (карточка ~170px); при новом запросе — снова с начала
+  const paged = usePaged(list, 170, query);
 
   return (
     <>
-      <PageHeader title="Соревнования" subtitle={`Всего: ${model.competitions.length}`} />
-      <Chips
-        options={[
-          { value: 'active', label: 'Предстоящие', count: groups.active.length },
-          { value: 'past', label: 'Прошедшие', count: groups.past.length },
-          { value: 'all', label: 'Все', count: groups.all.length },
-        ]}
-        value={filter}
-        onChange={setFilter}
-      />
-      <SearchInput value={query} onChange={setQuery} placeholder="Название, вид, адрес, № ЕКП" />
+      <PageHeader title="Соревнования" subtitle={`Предстоящих: ${upcoming.length}`} />
+      {upcoming.length > 0 && <SearchInput value={query} onChange={setQuery} placeholder="Название, вид, адрес, № ЕКП" />}
 
       {list.length === 0 ? (
-        <EmptyState icon="🏆" title="Ничего не найдено" />
+        <EmptyState icon="🏆" title={upcoming.length ? 'Ничего не найдено' : 'Нет предстоящих соревнований'} />
       ) : (
-        list.map((c) => (
-          <CompetitionCard
-            key={c.id}
-            competition={c}
-            onApply={onApply}
-            existing={applicationsForCompetition(model, c, me)}
-            onOpenApplications={() => onOpenPage('applications')}
-          />
-        ))
+        <>
+          {paged.visible.map((c) => (
+            <CompetitionCard
+              key={c.id}
+              competition={c}
+              onApply={onApply}
+              existing={applicationsForCompetition(model, c, me)}
+              onOpenApplications={() => onOpenPage('applications')}
+            />
+          ))}
+          <ShowMore paged={paged} />
+        </>
       )}
     </>
   );

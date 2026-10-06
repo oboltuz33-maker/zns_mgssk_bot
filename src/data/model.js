@@ -32,9 +32,30 @@ export const APPLICATION_STATUS = {
   deleted: 'Удалена',
 };
 
-// Разделитель элементов списка в ячейке заявки (оружие, виды транспорта): «;» и перенос строки
-export const LIST_SEPARATOR = ';\n';
+// Виды транспорта в ячейке заявки — через «;» и перенос строки
 const splitList = (value) => str(value).split(/;\s*/).map((s) => s.trim()).filter(Boolean);
+
+// Строки ячейки «Оружие»: по строке на спортсмена
+const textLines = (value) => str(value).split('\n').map((s) => s.trim()).filter(Boolean);
+
+// «Название - Номер» → { title, number } (номер — после последнего « - »: в названии дефис бывает)
+const splitTitleNumber = (text) => {
+  const i = text.lastIndexOf(' - ');
+  return i === -1 ? { title: text.trim(), number: '' } : { title: text.slice(0, i).trim(), number: text.slice(i + 3).trim() };
+};
+
+// Ячейка «Оружие» → [{ name: 'Фамилия И.О.', weapons: [{ title, number }] }].
+// Формат: по строке на спортсмена «Фамилия И.О. : Название - Номер ; Название - Номер»
+export const parseWeaponText = (value) =>
+  textLines(value)
+    .filter((line) => line.includes(' : '))
+    .map((line) => {
+      const colon = line.indexOf(' : ');
+      return {
+        name: line.slice(0, colon).trim(),
+        weapons: line.slice(colon + 3).split(';').map((s) => s.trim()).filter(Boolean).map(splitTitleNumber),
+      };
+    });
 
 // «Иванов», «Иван», «Петрович» → «Иванов И.П.» (так спортсмен записывается в заявке)
 export const shortName = (lastName, firstName, middleName) => {
@@ -44,15 +65,11 @@ export const shortName = (lastName, firstName, middleName) => {
 
 const rowsOf = (data, sheetName) => data?.sheets?.[sheetName]?.rows ?? [];
 
-// upcoming — ещё не началось, ongoing — идёт сейчас, past — завершилось
-export function competitionStatus(competition, now = new Date()) {
-  const today = moscowDay(now);
-  const start = competition.start && moscowDay(competition.start);
-  const end = competition.end ? moscowDay(competition.end) : start;
-  if (end && end < today) return 'past';
-  if (start && start <= today) return 'ongoing';
-  return 'upcoming';
-}
+// Предстоящее соревнование — дата начала сегодня или позже (по Москве). То же правило, что в Apps Script:
+// только на такие можно подать заявку. Без даты (или с неверной датой) — тоже предстоящее, чтобы не потерялось.
+// Здесь — на случай данных, сохранённых на устройстве раньше
+export const isUpcomingCompetition = (competition, now = new Date()) =>
+  !competition.start || moscowDay(competition.start) >= moscowDay(now);
 
 // Текущий спортсмен. Его определяет Apps Script по подписанным данным Telegram (athleteId);
 // если athleteId в данных нет (старая версия скрипта) — по ChatId пользователя
@@ -137,8 +154,9 @@ export function buildModel(data) {
       address: str(r['Адрес']),
       status: str(r['Статус']),
       canEdit: str(r['Статус']) === APPLICATION_STATUS.new,
-      // Элементы списков: «Фамилия И.О. - Название - Номер» и названия видов транспорта
-      weaponLines: splitList(r['Оружие']),
+      // Оружие: строки для показа и разобранные записи «спортсмен → его оружие»; виды транспорта — списком
+      weaponLines: textLines(r['Оружие']),
+      weaponEntries: parseWeaponText(r['Оружие']),
       transportList: splitList(r['Вид транспорта']),
       // CreatedBy — ID спортсмена, создавшего заявку; CreatedAt — момент создания (московское время)
       createdById: str(r['CreatedBy']),

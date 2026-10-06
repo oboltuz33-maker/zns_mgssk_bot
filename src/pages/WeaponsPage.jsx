@@ -2,25 +2,28 @@ import { useState } from 'react';
 import { findMyAthlete } from '../data/model.js';
 import { postAction } from '../data/api.js';
 import { fuzzySearch } from '../data/search.js';
-import { Chips, EmptyState, PageHeader, SearchInput, confirmAction } from '../components.jsx';
+import { Chips, EmptyState, PageHeader, SearchInput, ShowMore, confirmAction, usePaged } from '../components.jsx';
 
-// Сколько результатов поиска по справочнику показывать — справочник может быть большим
-const SEARCH_LIMIT = 20;
+// Примерная высота строки списка — по ней считается, сколько строк помещается на экран
+const ROW_HEIGHT = 64;
 
 // Раздел «Оружие»: вкладка «Закреплённое» — своё оружие (можно открепить),
-// вкладка «Справочник» — поиск по общему справочнику без своего (можно закрепить за собой)
+// вкладка «Справочник» — общий справочник без своего, с поиском (можно закрепить за собой).
+// Оба списка показываются порциями по экрану с кнопкой «Показать ещё»
 export function WeaponsPage({ model, user, sheets, onMessage }) {
   const me = findMyAthlete(model, user);
   const [tab, setTab] = useState('mine');
   const [query, setQuery] = useState('');
   const [busyId, setBusyId] = useState(null);
 
-  if (!me) return <EmptyState icon="🎯" title="Спортсмен не определён" />;
-
-  const mine = me.weapons;
+  const mine = me?.weapons ?? [];
   const catalog = model.weapons.filter((w) => !mine.includes(w));
-  // Справочник целиком не показываем — только результаты поиска
-  const found = query.trim() ? fuzzySearch(catalog, query, (w) => `${w.title} ${w.number}`, SEARCH_LIMIT) : [];
+  // Поиск с опечатками, в другой раскладке и транслитом; без запроса — весь справочник
+  const found = fuzzySearch(catalog, query, (w) => `${w.title} ${w.number}`);
+  const pagedMine = usePaged(mine, ROW_HEIGHT);
+  const pagedFound = usePaged(found, ROW_HEIGHT, query);
+
+  if (!me) return <EmptyState icon="🎯" title="Спортсмен не определён" />;
 
   // Закрепить или открепить; после ответа сервера данные перечитываются из таблицы
   const run = async (action, weapon) => {
@@ -62,32 +65,34 @@ export function WeaponsPage({ model, user, sheets, onMessage }) {
             Найдите свои единицы во вкладке «Справочник» и закрепите их за собой
           </EmptyState>
         ) : (
-          <div className="list">
-            {mine.map((w) => (
-              <div key={w.id} className="list-item">
-                <div className="list-text">
-                  <div className="item-title">{w.title}</div>
-                  <div className="item-hint">
-                    <code>{w.number}</code>
-                    {owners(w) && ` · также за: ${owners(w)}`}
+          <>
+            <div className="list">
+              {pagedMine.visible.map((w) => (
+                <div key={w.id} className="list-item">
+                  <div className="list-text">
+                    <div className="item-title">{w.title}</div>
+                    <div className="item-hint">
+                      <code>{w.number}</code>
+                      {owners(w) && ` · также за: ${owners(w)}`}
+                    </div>
                   </div>
+                  <button className="secondary-button danger" onClick={() => unassign(w)} disabled={busyId !== null}>
+                    {busyId === w.id ? '…' : 'Открепить'}
+                  </button>
                 </div>
-                <button className="secondary-button danger" onClick={() => unassign(w)} disabled={busyId !== null}>
-                  {busyId === w.id ? '…' : 'Открепить'}
-                </button>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+            <ShowMore paged={pagedMine} />
+          </>
         ))}
 
       {tab === 'catalog' && (
         <>
           <SearchInput value={query} onChange={setQuery} placeholder="Название или номер — можно с опечатками" />
-          {!query.trim() && <p className="sheet-meta">Введите название или номер оружия</p>}
-          {query.trim() && found.length === 0 && <p className="sheet-meta">Ничего не найдено</p>}
+          {found.length === 0 && <p className="sheet-meta">{query.trim() ? 'Ничего не найдено' : 'Справочник пуст'}</p>}
           {found.length > 0 && (
             <div className="list">
-              {found.map((w) => (
+              {pagedFound.visible.map((w) => (
                 <div key={w.id} className="list-item">
                   <div className="list-text">
                     <div className="item-title">{w.title}</div>
@@ -103,6 +108,7 @@ export function WeaponsPage({ model, user, sheets, onMessage }) {
               ))}
             </div>
           )}
+          <ShowMore paged={pagedFound} />
         </>
       )}
     </>

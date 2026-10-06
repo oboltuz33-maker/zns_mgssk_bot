@@ -25,7 +25,9 @@
  * Доступ:
  *  - initData и contact проверяются по подписи токеном бота — подделать пользователя или номер нельзя;
  *  - пользователь ищется в листе «Спортсмены» по ChatId; данные отдаются только при статусе «Подтвержден»;
- *  - листы из USER_SCOPED_SHEETS отдаются только со строками этого спортсмена.
+ *  - листы из USER_SCOPED_SHEETS отдаются только со строками этого спортсмена;
+ *  - из «Соревнований» отдаются только предстоящие (дата начала — сегодня или позже; соревнования
+ *    с неуказанной или неверной датой начала тоже отдаются, чтобы не потерялись).
  *
  * Уведомления: при ручной смене статуса спортсмена на «Подтвержден» и статуса заявки на «В работе» /
  * «Выполнена» бот пишет спортсмену (триггер onSheetEdit; создаётся один раз функцией installTriggers).
@@ -139,8 +141,12 @@ const APPLICATION_STATUS = {
 const TRANSPORT_DAYS_BEFORE = 1;
 const TRANSPORT_DAYS_AFTER = 1;
 
-// Разделитель элементов списка в ячейке заявки (оружие, виды транспорта)
+// Разделитель элементов списка в ячейке заявки (виды транспорта)
 const LIST_SEPARATOR = ';\n';
+
+// Столбец «Оружие»: по строке на спортсмена — «Фамилия И.О. : Название - Номер ; Название - Номер»
+const ATHLETE_WEAPONS_SEPARATOR = ' : ';
+const WEAPONS_SEPARATOR = ' ; ';
 
 // Листы, где каждому спортсмену видны только его строки: имя листа → столбец с ID спортсмена
 const USER_SCOPED_SHEETS = {
@@ -523,15 +529,13 @@ function buildApplication_(ss, author, input) {
 
     const weaponIds = Array.isArray(item.weaponIds) ? item.weaponIds : [];
     if (!weaponIds.length) throw userError_('Выберите оружие для спортсмена ' + athlete.shortName);
-    weaponIds.forEach(function (weaponId) {
+    // Строка спортсмена: «Фамилия И.О. : Название - Номер ; Название - Номер»
+    const athleteWeapons = weaponIds.map(function (weaponId) {
       const weapon = findById_(weapons, weaponId);
       if (!weapon) throw userError_('Оружие не найдено — обновите данные и выберите заново');
-      weaponLines.push([
-        athlete.shortName,
-        String(weapons.get(weapon, WEAPON_COLUMN.title)).trim(),
-        String(weapons.get(weapon, WEAPON_COLUMN.number)).trim(),
-      ].join(' - '));
+      return String(weapons.get(weapon, WEAPON_COLUMN.title)).trim() + ' - ' + String(weapons.get(weapon, WEAPON_COLUMN.number)).trim();
     });
+    weaponLines.push(athlete.shortName + ATHLETE_WEAPONS_SEPARATOR + athleteWeapons.join(WEAPONS_SEPARATOR));
   });
 
   const transportTypes = readTable_(ss, SHEET.transportTypes).rows.map(function (r) { return String(r.values[0]).trim(); });
@@ -541,26 +545,27 @@ function buildApplication_(ss, author, input) {
     if (transportTypes.indexOf(name) === -1) throw userError_('Вид транспорта «' + name + '» не найден в справочнике');
   });
 
-  // Сроки перевозки — от дат соревнования; без дат заявку не оформить
-  const competitionStart = competitions.get(competition, COMPETITION_COLUMN.start);
-  const competitionEnd = competitions.get(competition, COMPETITION_COLUMN.end) || competitionStart;
-  if (!(competitionStart instanceof Date) || !(competitionEnd instanceof Date)) {
-    throw userError_('У соревнования не указаны даты — обратитесь к администратору');
-  }
-  const transportStart = shiftDays_(competitionStart, -TRANSPORT_DAYS_BEFORE);
-  const transportEnd = shiftDays_(competitionEnd, TRANSPORT_DAYS_AFTER);
+  // Сроки перевозки — от дат соревнования. Если дата начала не указана или записана неверно,
+  // сроки остаются пустыми (их заполнит оформитель), а в «Сроки по ЕКП» переносится то, что записано в ячейках
+  const rawStart = competitions.get(competition, COMPETITION_COLUMN.start);
+  const rawEnd = competitions.get(competition, COMPETITION_COLUMN.end);
+  const competitionStart = sheetDate_(rawStart);
+  const competitionEnd = sheetDate_(rawEnd) || competitionStart;
+  if (!isUpcoming_(rawStart)) throw userError_('Соревнование уже началось — заявку на него подать нельзя');
+  const transportStart = competitionStart ? shiftDays_(competitionStart, -TRANSPORT_DAYS_BEFORE) : '';
+  const transportEnd = competitionEnd ? shiftDays_(competitionEnd, TRANSPORT_DAYS_AFTER) : '';
 
   const fields = {};
   fields[APPLICATION_COLUMN.fullName] = author.fullName;
-  fields[APPLICATION_COLUMN.weapon] = weaponLines.join(LIST_SEPARATOR);
+  fields[APPLICATION_COLUMN.weapon] = weaponLines.join('\n');
   fields[APPLICATION_COLUMN.transport] = transport.join(LIST_SEPARATOR);
   fields[APPLICATION_COLUMN.transportStart] = transportStart;
   fields[APPLICATION_COLUMN.transportEnd] = transportEnd;
   fields[APPLICATION_COLUMN.competitionKind] = competitions.get(competition, COMPETITION_COLUMN.kind);
   fields[APPLICATION_COLUMN.competitionTitle] = competitions.get(competition, COMPETITION_COLUMN.title);
   fields[APPLICATION_COLUMN.ekpNumber] = competitions.get(competition, COMPETITION_COLUMN.ekpNumber);
-  fields[APPLICATION_COLUMN.ekpStart] = competitions.get(competition, COMPETITION_COLUMN.start);
-  fields[APPLICATION_COLUMN.ekpEnd] = competitions.get(competition, COMPETITION_COLUMN.end);
+  fields[APPLICATION_COLUMN.ekpStart] = competitionStart || rawStart;
+  fields[APPLICATION_COLUMN.ekpEnd] = sheetDate_(rawEnd) || rawEnd;
   fields[APPLICATION_COLUMN.address] = competitions.get(competition, COMPETITION_COLUMN.address);
   return fields;
 }
@@ -696,6 +701,12 @@ function readSheets_(ss, names, athleteId) {
     if (ownerColumn) {
       const col = headers.indexOf(ownerColumn);
       rows = col === -1 ? [] : rows.filter(function (row) { return String(row[col]).trim() === athleteId; });
+    }
+
+    // Соревнования — только предстоящие: заявку можно подать только на них
+    if (name === SHEET.competitions) {
+      const startCol = headers.indexOf(COMPETITION_COLUMN.start);
+      rows = startCol === -1 ? [] : rows.filter(function (row) { return isUpcoming_(row[startCol]); });
     }
 
     sheets[name] = { headers: headers, rows: rows };
@@ -914,6 +925,25 @@ function normalizePhone_(value) {
 function shortName_(lastName, firstName, middleName) {
   const initials = [firstName, middleName].filter(Boolean).map(function (n) { return n.charAt(0).toUpperCase() + '.'; }).join('');
   return [lastName, initials].filter(Boolean).join(' ');
+}
+
+// Предстоящее соревнование: дата начала — сегодня или позже (по часовому поясу скрипта).
+// Дата не указана или записана так, что её не разобрать, — тоже считаем предстоящим, иначе соревнование
+// пропадёт из приложения; заявка на него оформляется без сроков перевозки
+function isUpcoming_(start) {
+  const date = sheetDate_(start);
+  if (!date) return true;
+  const now = new Date();
+  return date >= new Date(now.getFullYear(), now.getMonth(), now.getDate());
+}
+
+// Дата из ячейки: ячейка с типом «дата» или текст «дд.мм.гггг» (полночь в часовом поясе скрипта); иначе null
+function sheetDate_(value) {
+  if (value instanceof Date) return value;
+  const m = String(value || '').trim().match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+  if (!m) return null;
+  const date = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+  return date.getMonth() === Number(m[2]) - 1 ? date : null;
 }
 
 // Дата ± дни (полночь в часовом поясе скрипта)

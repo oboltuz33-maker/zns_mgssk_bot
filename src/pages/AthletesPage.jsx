@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { Badge, EmptyState, PageHeader, SearchInput, matches } from '../components.jsx';
+import { Badge, EmptyState, PageHeader, SearchInput } from '../components.jsx';
+import { fuzzySearch } from '../data/search.js';
 
 export function AthleteStatus({ athlete }) {
   return (
@@ -27,8 +28,9 @@ export function WeaponList({ weapons }) {
 
 export function AthletesPage({ model }) {
   const [query, setQuery] = useState('');
-  const list = model.athletes.filter((a) =>
-    matches(query, a.fullName, a.phone, a.status, ...a.weapons.map((w) => `${w.title} ${w.number}`)),
+  // Поиск с опечатками, в другой раскладке и транслитом
+  const list = fuzzySearch(model.athletes, query, (a) =>
+    [a.fullName, a.phone, a.status, ...a.weapons.map((w) => `${w.title} ${w.number}`)].join(' '),
   );
 
   return (

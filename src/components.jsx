@@ -1,4 +1,36 @@
 // Общие элементы интерфейса страниц
+import { useState } from 'react';
+
+// ---------- Списки порциями ----------
+// Длинные списки показываются частями: сначала столько элементов, сколько помещается на экран,
+// дальше — кнопкой «Показать ещё».
+
+const MIN_PAGE_SIZE = 3;
+
+// Сколько элементов примерно высотой itemHeight (в пикселях) помещается на экран устройства
+const pageSizeFor = (itemHeight) => Math.max(MIN_PAGE_SIZE, Math.ceil(window.innerHeight / itemHeight));
+
+// Видимая часть списка. resetKey — например, поисковый запрос или фильтр: когда он меняется,
+// список снова показывается с первой порции
+export function usePaged(items, itemHeight, resetKey = '') {
+  const pageSize = pageSizeFor(itemHeight);
+  const [state, setState] = useState({ key: resetKey, count: pageSize });
+  const count = state.key === resetKey ? state.count : pageSize;
+  return {
+    visible: items.slice(0, count),
+    rest: Math.max(0, items.length - count),
+    more: () => setState({ key: resetKey, count: count + pageSize }),
+  };
+}
+
+export function ShowMore({ paged }) {
+  if (!paged.rest) return null;
+  return (
+    <button className="secondary-button show-more" onClick={paged.more}>
+      Показать ещё ({paged.rest})
+    </button>
+  );
+}
 
 // Даты показываются по московскому времени независимо от часового пояса телефона
 const DATE_FORMAT = { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'Europe/Moscow' };
@@ -14,6 +46,10 @@ export const formatRange = (start, end) => {
   return `${formatDate(start)} – ${formatDate(end)}`;
 };
 
+// Даты соревнования; если дата начала не указана или записана неверно — так и пишем
+export const formatCompetitionDates = (competition) =>
+  competition?.start ? formatRange(competition.start, competition.end) : 'Дата не указана';
+
 // Подтверждение в стиле Telegram, вне Telegram — обычный confirm
 export const confirmAction = (text) =>
   new Promise((resolve) => {
@@ -21,12 +57,6 @@ export const confirmAction = (text) =>
     if (tg?.initData && tg.isVersionAtLeast?.('6.2')) tg.showConfirm(text, resolve);
     else resolve(window.confirm(text));
   });
-
-// Поиск без учёта регистра по нескольким полям
-export const matches = (query, ...fields) => {
-  const q = query.trim().toLowerCase();
-  return !q || fields.some((f) => String(f ?? '').toLowerCase().includes(q));
-};
 
 export function SearchInput({ value, onChange, placeholder = 'Поиск' }) {
   return (

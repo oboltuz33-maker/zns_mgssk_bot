@@ -1,4 +1,4 @@
-import { competitionStatus, findMyAthlete } from '../data/model.js';
+import { findMyAthlete, isUpcomingCompetition } from '../data/model.js';
 import { EmptyState, PageHeader } from '../components.jsx';
 import { SheetBrowser } from '../SheetBrowser.jsx';
 import { CompetitionCard } from './CompetitionsPage.jsx';
@@ -8,7 +8,7 @@ const UPCOMING_ON_HOME = 3;
 
 export function HomePage({ user, model, sheets, telegramStatus, onOpenPage, onRecheckTelegram }) {
   const me = findMyAthlete(model, user);
-  const upcoming = model.competitions.filter((c) => competitionStatus(c) !== 'past');
+  const upcoming = model.competitions.filter((c) => isUpcomingCompetition(c));
 
   const stats = [
     { page: 'competitions', icon: '🏆', value: upcoming.length, label: 'предстоящих соревнований' },

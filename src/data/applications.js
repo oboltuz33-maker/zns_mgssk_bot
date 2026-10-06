@@ -16,8 +16,9 @@ export const transportDates = (competition) => {
   return { start: new Date(competition.start.getTime() - DAY_MS), end: new Date(end.getTime() + DAY_MS) };
 };
 
-// Оружие, которое сразу отмечается при добавлении спортсмена: единственное закреплённое за ним
-export const defaultWeaponIds = (athlete) => (athlete?.weapons.length === 1 ? [athlete.weapons[0].id] : []);
+// Оружие, которое сразу отмечается при добавлении спортсмена: всё закреплённое за ним (обычно везут своё;
+// лишнее снимается одним нажатием)
+export const defaultWeaponIds = (athlete) => (athlete?.weapons ?? []).map((w) => w.id);
 
 export function newDraft(model, me, competitionId = '') {
   const competition = model.competitions.find((c) => c.id === competitionId);
@@ -31,13 +32,10 @@ export function newDraft(model, me, competitionId = '') {
   };
 }
 
-// Строка столбца «Оружие» «Фамилия И.О. - Название - Номер» → { athlete, weapon } или null.
+// Запись из столбца «Оружие» («Фамилия И.О.» + { title, number }) → { athlete, weapon } или null.
 // Оружие — по номеру, спортсмен — по «Фамилия И.О.» (сначала среди владельцев этого оружия)
-function parseWeaponLine(model, line) {
-  const parts = line.split(' - ').map((s) => s.trim());
-  const number = parts.length >= 3 ? parts[parts.length - 1].toLowerCase() : '';
-  const name = parts[0];
-  const weapon = number && model.weapons.find((w) => w.number.toLowerCase() === number);
+function matchWeapon(model, name, { number }) {
+  const weapon = number && model.weapons.find((w) => w.number.toLowerCase() === number.toLowerCase());
   const athlete =
     (weapon && weapon.owners.find((a) => a.shortName === name)) || model.athletes.find((a) => a.shortName === name);
   return weapon && athlete ? { athlete, weapon } : null;
@@ -56,16 +54,18 @@ export function draftFromApplication(model, application) {
   if (!competition) problems.push(`Соревнование «${application.competitionTitle}» не найдено в списке`);
 
   const items = [];
-  for (const line of application.weaponLines) {
-    const parsed = parseWeaponLine(model, line);
-    if (!parsed) {
-      problems.push(`Не распознано: «${line}»`);
-      continue;
+  for (const entry of application.weaponEntries) {
+    for (const w of entry.weapons) {
+      const matched = matchWeapon(model, entry.name, w);
+      if (!matched) {
+        problems.push(`Не распознано: «${entry.name} : ${w.title} - ${w.number}»`);
+        continue;
+      }
+      const { athlete, weapon } = matched;
+      let item = items.find((i) => i.athleteId === athlete.id);
+      if (!item) items.push((item = { athleteId: athlete.id, weaponIds: [] }));
+      if (!item.weaponIds.includes(weapon.id)) item.weaponIds.push(weapon.id);
     }
-    const { athlete, weapon } = parsed;
-    let item = items.find((i) => i.athleteId === athlete.id);
-    if (!item) items.push((item = { athleteId: athlete.id, weaponIds: [] }));
-    if (!item.weaponIds.includes(weapon.id)) item.weaponIds.push(weapon.id);
   }
 
   const transport = application.transportList.filter((t) => model.transportTypes.includes(t));
@@ -109,8 +109,8 @@ export function recentAthletes(model, me) {
   model.applications
     .filter((a) => a.createdById === me?.id) // заявки уже отсортированы: новые первыми
     .forEach((application) =>
-      application.weaponLines.forEach((line) => {
-        const athlete = parseWeaponLine(model, line)?.athlete;
+      application.weaponEntries.forEach((entry) => {
+        const athlete = entry.weapons.map((w) => matchWeapon(model, entry.name, w)?.athlete).find(Boolean);
         if (athlete && !result.includes(athlete)) result.push(athlete);
       }),
     );
@@ -173,14 +173,16 @@ export function loadSavedDraft(model, me) {
   }
 }
 
-// Строки столбца «Оружие» — так же, как их соберёт Apps Script (для предпросмотра)
+// Строки столбца «Оружие» — так же, как их соберёт Apps Script (для предпросмотра):
+// по строке на спортсмена «Фамилия И.О. : Название - Номер ; Название - Номер»
 export const weaponLines = (draft, model) =>
-  draft.items.flatMap((item) => {
+  draft.items.map((item) => {
     const athlete = model.athletes.find((a) => a.id === item.athleteId);
-    return item.weaponIds.map((id) => {
+    const weapons = item.weaponIds.map((id) => {
       const weapon = model.weapons.find((w) => w.id === id);
-      return [athlete?.shortName, weapon?.title, weapon?.number].join(' - ');
+      return `${weapon?.title} - ${weapon?.number}`;
     });
+    return `${athlete?.shortName} : ${weapons.join(' ; ')}`;
   });
 
 // Отправка в Apps Script. Ответ: { status: 'success', number } или { status: 'error', message }
