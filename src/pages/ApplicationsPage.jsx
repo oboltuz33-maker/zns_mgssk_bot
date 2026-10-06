@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { APPLICATION_STATUS, findMyAthlete } from '../data/model.js';
 import { deleteApplication } from '../data/applications.js';
+import { withoutApplication } from '../data/patches.js';
 import { Badge, EmptyState, PageHeader, SearchInput, ShowMore, confirmAction, formatDateTime, formatRange, usePaged } from '../components.jsx';
 import { fuzzySearch } from '../data/search.js';
 
@@ -32,7 +33,8 @@ export function ApplicationsPage({ model, user, sheets, onOpenPage, onMessage })
     try {
       const result = await deleteApplication(application.number);
       if (result.status !== 'success') throw new Error(result.message || 'Не удалось удалить заявку');
-      await sheets.refresh();
+      // Удалённая заявка сразу пропадает из списка — таблицу целиком не перекачиваем
+      sheets.patch((data) => withoutApplication(data, application.number));
       onMessage(`Заявка № ${application.number} удалена`);
     } catch (e) {
       console.error(e);

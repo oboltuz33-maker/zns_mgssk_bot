@@ -40,7 +40,7 @@
  * «Настройки проекта» (⚙️) → «Свойства скрипта» → BOT_TOKEN = <токен от @BotFather>.
  *
  * Первая строка листа — заголовки, первый столбец — ID строки.
- * Листы, имя которых начинается с "_", не отдаются.
+ * Приложению отдаются только листы из APP_SHEETS.
  */
 
 // Если скрипт не привязан к таблице, укажите её ID (из адреса таблицы)
@@ -61,6 +61,17 @@ const SHEET = {
   // а администратор видит его прямо в таблице. Создаётся автоматически при первой записи.
   log: '_Журнал',
 };
+
+// Листы, которые можно отдать приложению. Остальные (архивы, служебные, новые листы, добавленные позже)
+// приложению не отдаются, даже если их запросить, — чтобы случайно не открыть лишние данные
+const APP_SHEETS = [
+  SHEET.competitions,
+  SHEET.athletes,
+  SHEET.weapons,
+  SHEET.athleteWeapons,
+  SHEET.applications,
+  SHEET.transportTypes,
+];
 
 // Названия столбцов (заголовки первой строки) по листам
 
@@ -165,6 +176,22 @@ const NAME_MAX_LENGTH = 100;
 // Сколько помнить ответы на POST-запросы по requestId — чтобы повтор при обрыве связи не выполнил действие дважды
 const REQUEST_CACHE_SECONDS = 10 * 60;
 
+// Кэш листов для отдачи приложению (doGet): экономит время выполнения и лимиты Apps Script.
+// Сбрасывается при записи через приложение и при ручной правке листа; иначе живёт столько секунд
+const SHEET_CACHE_SECONDS = 5 * 60;
+// Лист больше этого размера (символов JSON) в кэш не кладётся — у CacheService предел 100 КБ на значение
+const SHEET_CACHE_MAX_CHARS = 45000;
+
+// В какие листы пишет каждое действие doPost — их кэш сбрасывается после действия
+const WRITES_SHEETS = {
+  linkPhone: [SHEET.athletes],
+  register: [SHEET.athletes],
+  saveApplication: [SHEET.applications],
+  deleteApplication: [SHEET.applications],
+  assignWeapon: [SHEET.athleteWeapons],
+  unassignWeapon: [SHEET.athleteWeapons],
+};
+
 // Как связаться с администратором (например, '@username' или телефон) — подставляется
 // в сообщения пользователю, когда без администратора не обойтись. Пусто — не показывается.
 const ADMIN_CONTACT = '';
@@ -187,7 +214,7 @@ function doGet(e) {
     if (!user) return telegramDenied_(params.initData);
 
     const ss = spreadsheet_();
-    const athlete = findAthlete_(athletesTable_(ss), function (a) { return a.chatId === String(user.id); });
+    const athlete = findAthlete_(athletesTable_(ss, true), function (a) { return a.chatId === String(user.id); });
     const denied = accessDenied_(athlete);
     if (denied) return denied;
     return readSheets_(ss, params.names, athlete.id);
@@ -213,6 +240,8 @@ function doPost(e) {
 
       const result = runAction_(user, body);
       if (cacheKey) cache.put(cacheKey, JSON.stringify(result), REQUEST_CACHE_SECONDS);
+      // Листы, в которые действие могло записать, — их кэш для чтения устарел
+      if (WRITES_SHEETS[body.action]) invalidateSheets_(WRITES_SHEETS[body.action]);
       return result;
     } finally {
       lock.releaseLock();
@@ -372,11 +401,12 @@ function register_(user, body) {
 
 // ---------- Лист «Спортсмены» ----------
 
-function athletesTable_(ss) {
+// fromCache — для чтения (doGet) лист можно взять из кэша; для записи — только свежий
+function athletesTable_(ss, fromCache) {
   const sheet = ss.getSheetByName(SHEET.athletes);
   if (!sheet) throw new Error('Нет листа «' + SHEET.athletes + '»');
 
-  const values = sheet.getDataRange().getValues();
+  const values = sheetValues_(ss, SHEET.athletes, Boolean(fromCache));
   const headers = values[0].map(String);
   const col = function (name, required) {
     const i = headers.indexOf(name);
@@ -440,11 +470,18 @@ function findAthlete_(table, predicate) {
 
 // Создание (без number) или изменение заявки. Текст строки собирается по ID из справочников —
 // значениям из приложения доверяются только ID и выбор, а не готовый текст.
+// В ответе — сохранённая строка { заголовок: значение }: приложение сразу показывает её в списке заявок,
+// не дожидаясь, пока перечитает таблицу (при плохой связи это может затянуться)
 function saveApplication_(user, input) {
   const ss = spreadsheet_();
   const author = requireCarrier_(ss, user);
   const fields = buildApplication_(ss, author, input);
   const table = readTable_(ss, SHEET.applications);
+  const rowObject = function (values) {
+    const result = {};
+    table.headers.forEach(function (h, i) { result[h] = values[i]; });
+    return result;
+  };
 
   if (input.number) {
     const row = ownNewApplication_(table, input.number, author);
@@ -452,7 +489,7 @@ function saveApplication_(user, input) {
     Object.keys(fields).forEach(function (name) { values[table.col(name)] = fields[name]; });
     table.sheet.getRange(row.row, 1, 1, values.length).setValues([values]);
     log_(ss, 'Заявка изменена', user, { athleteId: author.id, text: '№ ' + input.number });
-    return { status: 'success', number: Number(input.number) };
+    return { status: 'success', number: Number(input.number), row: rowObject(values) };
   }
 
   const number = nextApplicationNumber_(ss, table);
@@ -460,9 +497,10 @@ function saveApplication_(user, input) {
   fields[APPLICATION_COLUMN.status] = APPLICATION_STATUS.new;
   fields[APPLICATION_COLUMN.createdBy] = author.id;
   fields[APPLICATION_COLUMN.createdAt] = new Date();
-  table.sheet.appendRow(table.headers.map(function (h) { return fields.hasOwnProperty(h) ? fields[h] : ''; }));
+  const newValues = table.headers.map(function (h) { return fields.hasOwnProperty(h) ? fields[h] : ''; });
+  table.sheet.appendRow(newValues);
   log_(ss, 'Заявка создана', user, { athleteId: author.id, text: '№ ' + number + ', ' + fields[APPLICATION_COLUMN.competitionTitle] });
-  return { status: 'success', number: number };
+  return { status: 'success', number: number, row: rowObject(newValues) };
 }
 
 // Удаление автором: строка переносится в «Архив заявок» (столбцы сопоставляются по заголовкам)
@@ -603,7 +641,8 @@ function assignWeapon_(user, weaponId) {
   const already = links.rows.some(function (r) {
     return String(r.values[athleteCol]).trim() === athlete.id && String(r.values[weaponCol]).trim() === String(weaponId);
   });
-  if (already) return { status: 'success', message: title + ' уже закреплено за вами' };
+  const link = { athleteId: athlete.id, weaponId: String(weaponId) };
+  if (already) return { status: 'success', message: title + ' уже закреплено за вами', link: link };
 
   links.sheet.appendRow(links.headers.map(function (h) {
     if (h === ATHLETE_WEAPON_COLUMN.athleteId) return athlete.id;
@@ -611,7 +650,7 @@ function assignWeapon_(user, weaponId) {
     return '';
   }));
   log_(ss, 'Оружие закреплено', user, { athleteId: athlete.id, text: title });
-  return { status: 'success', message: title + ' закреплено за вами' };
+  return { status: 'success', message: title + ' закреплено за вами', link: link };
 }
 
 // Спортсмен открепляет от себя единицу оружия: удаляются его строки с этой единицей в «Спортсмен/Оружие».
@@ -628,7 +667,8 @@ function unassignWeapon_(user, weaponId) {
   const mine = links.rows.filter(function (r) {
     return String(r.values[athleteCol]).trim() === athlete.id && String(r.values[weaponCol]).trim() === String(weaponId);
   });
-  if (!mine.length) return { status: 'success', message: 'Это оружие уже не закреплено за вами' };
+  const link = { athleteId: athlete.id, weaponId: String(weaponId) };
+  if (!mine.length) return { status: 'success', message: 'Это оружие уже не закреплено за вами', link: link };
 
   // Снизу вверх, чтобы номера ещё не удалённых строк не сдвигались
   mine.map(function (r) { return r.row; }).sort(function (a, b) { return b - a; }).forEach(function (row) {
@@ -641,16 +681,74 @@ function unassignWeapon_(user, weaponId) {
     ? String(weapons.get(weapon, WEAPON_COLUMN.title)).trim() + ' ' + String(weapons.get(weapon, WEAPON_COLUMN.number)).trim()
     : String(weaponId);
   log_(ss, 'Оружие откреплено', user, { athleteId: athlete.id, text: title });
-  return { status: 'success', message: title + ' откреплено' };
+  return { status: 'success', message: title + ' откреплено', link: link };
 }
 
 // ---------- Работа с листами ----------
+// Чтение листа — самая долгая часть вызова скрипта. Поэтому:
+//  - за один вызов каждый лист читается из таблицы не больше одного раза (sheetValuesMemo_);
+//  - для отдачи данных приложению (doGet) листы берутся из CacheService на SHEET_CACHE_SECONDS.
+//    Кэш листа сбрасывается при любой записи через приложение и при ручной правке листа (onSheetEdit);
+//    правки другими скриптами (например, перенос соревнований в архив) видны не позже чем через это время.
+//  - запись (doPost) всегда работает со свежими данными таблицы, не из кэша.
+
+// Значения листов, уже прочитанных в этом вызове скрипта (глобальные переменные живут один вызов)
+const sheetValuesMemo_ = {};
+
+// Значения листа вместе со строкой заголовков, без пустых столбцов справа от последнего заголовка.
+// fromCache — можно взять из CacheService (только для чтения)
+function sheetValues_(ss, name, fromCache) {
+  if (sheetValuesMemo_[name]) return sheetValuesMemo_[name];
+  let values = fromCache ? cacheGetSheet_(name) : null;
+  if (!values) {
+    const sheet = ss.getSheetByName(name);
+    if (!sheet) throw new Error('Нет листа «' + name + '»');
+    values = trimEmptyColumns_(sheet.getDataRange().getValues());
+    if (fromCache) cachePutSheet_(name, values);
+  }
+  sheetValuesMemo_[name] = values;
+  return values;
+}
+
+// Столбцы справа от последнего непустого заголовка не нужны (их отдаёт getDataRange, если там есть форматирование)
+function trimEmptyColumns_(values) {
+  const headers = values[0] || [];
+  let width = headers.length;
+  while (width > 0 && String(headers[width - 1]).trim() === '') width--;
+  return width === headers.length ? values : values.map(function (row) { return row.slice(0, width); });
+}
+
+// Кэш листа: даты сохраняются как { $d: время }, чтобы после чтения из кэша снова стать датами
+function cachePutSheet_(name, values) {
+  const json = JSON.stringify(values.map(function (row) {
+    return row.map(function (cell) { return cell instanceof Date ? { $d: cell.getTime() } : cell; });
+  }));
+  if (json.length > SHEET_CACHE_MAX_CHARS) return; // слишком большой для CacheService — читаем таблицу
+  try {
+    CacheService.getScriptCache().put('sheet:' + name, json, SHEET_CACHE_SECONDS);
+  } catch (err) {
+    console.error('Не удалось сохранить лист «' + name + '» в кэш: ' + err);
+  }
+}
+
+function cacheGetSheet_(name) {
+  const json = CacheService.getScriptCache().get('sheet:' + name);
+  if (!json) return null;
+  return JSON.parse(json).map(function (row) {
+    return row.map(function (cell) { return cell && cell.$d !== undefined ? new Date(cell.$d) : cell; });
+  });
+}
+
+// После записи в лист (или ручной правки) его кэш устарел
+function invalidateSheets_(names) {
+  CacheService.getScriptCache().removeAll(names.map(function (name) { return 'sheet:' + name; }));
+}
 
 // Лист как таблица: заголовки, строки с непустым ID (первый столбец) и доступ к ячейкам по названию столбца
 function readTable_(ss, name) {
   const sheet = ss.getSheetByName(name);
   if (!sheet) throw new Error('Нет листа «' + name + '»');
-  const values = sheet.getDataRange().getValues();
+  const values = sheetValues_(ss, name, false);
   const headers = (values[0] || []).map(String);
   const rows = [];
   for (let r = 1; r < values.length; r++) {
@@ -682,20 +780,26 @@ function findById_(table, id) {
 // ---------- Чтение листов ----------
 
 function readSheets_(ss, names, athleteId) {
-  const wanted = names ? names.split(',').map(function (n) { return n.trim(); }) : null;
+  const wanted = names ? names.split(',').map(function (n) { return n.trim(); }) : APP_SHEETS;
   const sheets = {};
 
-  ss.getSheets().forEach(function (sheet) {
-    const name = sheet.getName();
-    if (name.charAt(0) === '_') return;
-    if (wanted && wanted.indexOf(name) === -1) return;
+  APP_SHEETS.forEach(function (name) {
+    if (wanted.indexOf(name) === -1 || !ss.getSheetByName(name)) return;
 
-    // Один вызов getValues на лист — самый дешёвый способ чтения
-    const values = sheet.getDataRange().getValues();
-    const headers = (values.shift() || []).map(String);
-    let rows = values.filter(function (row) {
+    const values = sheetValues_(ss, name, true);
+    const headers = (values[0] || []).map(String);
+    let rows = values.slice(1).filter(function (row) {
       return row.some(function (cell) { return cell !== ''; });
     });
+
+    // Телефоны и ChatId спортсменов приложению не нужны (участников выбирают по ФИО) — отдаём только свои
+    if (name === SHEET.athletes) {
+      const hidden = [headers.indexOf(ATHLETE_COLUMN.phone), headers.indexOf(ATHLETE_COLUMN.chatId)];
+      rows = rows.map(function (row) {
+        if (String(row[0]).trim() === athleteId) return row;
+        return row.map(function (cell, i) { return hidden.indexOf(i) === -1 ? cell : ''; });
+      });
+    }
 
     const ownerColumn = USER_SCOPED_SHEETS[name];
     if (ownerColumn) {
@@ -725,7 +829,7 @@ function readSheets_(ss, names, athleteId) {
  */
 function verifySigned_(query) {
   if (!query) return {};
-  const botToken = PropertiesService.getScriptProperties().getProperty('BOT_TOKEN');
+  const botToken = botToken_();
   if (!botToken) throw new Error('Не задано свойство скрипта BOT_TOKEN');
 
   const fields = {};
@@ -755,6 +859,13 @@ function verifySigned_(query) {
   if (Date.now() / 1000 - authDate > INIT_DATA_MAX_AGE_SECONDS) return { expired: true };
 
   return { fields: fields };
+}
+
+// Токен бота из свойств скрипта — читается один раз за вызов
+let botTokenMemo_;
+function botToken_() {
+  if (botTokenMemo_ === undefined) botTokenMemo_ = PropertiesService.getScriptProperties().getProperty('BOT_TOKEN') || '';
+  return botTokenMemo_;
 }
 
 // Пользователь Telegram из initData или null
@@ -802,6 +913,8 @@ function installTriggers() {
 function onSheetEdit(e) {
   try {
     const sheetName = e.range.getSheet().getName();
+    // Лист правили вручную — его кэш для приложения устарел
+    if (APP_SHEETS.indexOf(sheetName) !== -1) invalidateSheets_([sheetName]);
     // Значение не изменилось (выбрали то же самое) — молчим. oldValue есть только у правки одной ячейки
     if (e.range.getNumRows() === 1 && e.range.getNumColumns() === 1 && e.oldValue === e.value) return;
 
@@ -857,7 +970,7 @@ function notify_(ss, athlete, text, logEvent) {
 
 // Отправка через Bot API. Возвращает null или текст ошибки (например, пользователь не разрешил боту писать)
 function sendTelegram_(chatId, text) {
-  const botToken = PropertiesService.getScriptProperties().getProperty('BOT_TOKEN');
+  const botToken = botToken_();
   if (!botToken) return 'не задано свойство скрипта BOT_TOKEN';
   const response = UrlFetchApp.fetch('https://api.telegram.org/bot' + botToken + '/sendMessage', {
     method: 'post',

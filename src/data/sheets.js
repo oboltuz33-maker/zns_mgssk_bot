@@ -61,9 +61,11 @@ export function readCache() {
   }
 }
 
-function writeCache(data) {
+// savedAt — когда данные загружены из таблицы. При правке данных на месте (writeCache с прежним savedAt)
+// срок их свежести не продлевается: при следующем открытии таблица перечитается как обычно
+export function writeCache(data, savedAt = Date.now()) {
   try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify({ savedAt: Date.now(), sheetsParam: SHEETS_PARAM, userId: telegramUserId(), data }));
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ savedAt, sheetsParam: SHEETS_PARAM, userId: telegramUserId(), data }));
   } catch {
     // Переполнен localStorage или он недоступен — просто работаем без кэша
   }
@@ -86,7 +88,8 @@ export async function fetchSheets() {
   url.searchParams.set('initData', initData);
   if (SHEETS_PARAM) url.searchParams.set('names', SHEETS_PARAM);
 
-  const response = await fetchWithRetry(url);
+  // Адрес запроса всегда одинаковый — запрещаем браузеру отдавать сохранённый ответ вместо свежего
+  const response = await fetchWithRetry(url, { cache: 'no-store' });
   let json;
   try {
     json = await response.json();

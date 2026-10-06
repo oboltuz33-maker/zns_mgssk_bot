@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { findMyAthlete } from '../data/model.js';
 import { postAction } from '../data/api.js';
+import { withWeaponLink, withoutWeaponLink } from '../data/patches.js';
 import { fuzzySearch } from '../data/search.js';
 import { Chips, EmptyState, PageHeader, SearchInput, ShowMore, confirmAction, usePaged } from '../components.jsx';
 
@@ -25,13 +26,19 @@ export function WeaponsPage({ model, user, sheets, onMessage }) {
 
   if (!me) return <EmptyState icon="🎯" title="Спортсмен не определён" />;
 
-  // Закрепить или открепить; после ответа сервера данные перечитываются из таблицы
+  // Закрепить или открепить. Изменение применяется на месте — таблицу целиком не перекачиваем;
+  // старая версия скрипта изменение не возвращает — тогда перечитываем таблицу
   const run = async (action, weapon) => {
     setBusyId(weapon.id);
     try {
       const result = await postAction(action, { weaponId: weapon.id });
       if (result.status !== 'success') throw new Error(result.message || 'Не удалось выполнить действие');
-      await sheets.refresh();
+      if (result.link) {
+        const apply = action === 'assignWeapon' ? withWeaponLink : withoutWeaponLink;
+        sheets.patch((data) => apply(data, result.link));
+      } else {
+        await sheets.refresh();
+      }
       onMessage(result.message);
     } catch (e) {
       console.error(e);

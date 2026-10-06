@@ -15,6 +15,7 @@ import {
   transportDates,
   weaponLines,
 } from '../data/applications.js';
+import { withApplicationRow } from '../data/patches.js';
 import {
   Badge,
   EmptyState,
@@ -98,7 +99,10 @@ export function ApplicationWizard({ model, me, params, sheets, onOpenPage, onCan
       if (me && !draft.number) clearSavedDraft(me);
       tg()?.HapticFeedback?.notificationOccurred('success');
       setResult({ number: response.number, isEdit: Boolean(draft.number) });
-      sheets.refresh(); // список заявок обновится в фоне
+      // Сохранённая строка сразу появляется в «Моих заявках» — таблицу целиком не перекачиваем.
+      // Старая версия скрипта строку не возвращает — тогда перечитываем таблицу
+      if (response.row) sheets.patch((data) => withApplicationRow(data, response.row));
+      else sheets.refresh();
     } catch (e) {
       console.error(e);
       setError(e.message || 'Ошибка сети');
@@ -415,7 +419,7 @@ function ParticipantsStep({ draft, model, me, update, showErrors }) {
   );
 }
 
-// Участник заявки: его оружие — плашками (нажатие выбирает или снимает), «＋ Другое» — выбор из справочника
+// Участник заявки: его оружие — плашками (нажатие выбирает или снимает), «＋ Добавить» — выбор из справочника
 function ParticipantCard({ item, model, onRemove, onWeapons, showErrors }) {
   const [picking, setPicking] = useState(false);
   const athlete = model.athletes.find((a) => a.id === item.athleteId);
@@ -445,7 +449,7 @@ function ParticipantCard({ item, model, onRemove, onWeapons, showErrors }) {
           );
         })}
         <button className="weapon-chip add" onClick={() => setPicking(true)}>
-          ＋ Другое
+          ＋ Добавить
         </button>
       </div>
       {picking && (
