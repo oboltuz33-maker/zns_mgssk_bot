@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { competitionStatus } from '../data/model.js';
+import { competitionStatus, findMyAthlete } from '../data/model.js';
+import { applicationsForCompetition } from '../data/applications.js';
 import { Badge, Chips, EmptyState, PageHeader, SearchInput, formatRange, matches } from '../components.jsx';
 
 const STATUS_BADGE = {
@@ -10,7 +11,9 @@ const STATUS_BADGE = {
 
 const daysUntil = (date) => Math.ceil((date - new Date()) / 86_400_000);
 
-export function CompetitionCard({ competition }) {
+// onApply — кнопка «Подать заявку» (передаётся только перевозчикам).
+// existing — уже поданные заявки перевозчика на это соревнование: вместо «Подать заявку» показываются они
+export function CompetitionCard({ competition, onApply, existing = [], onOpenApplications }) {
   const status = competitionStatus(competition);
   const badge = STATUS_BADGE[status];
   const days = status === 'upcoming' && competition.start ? daysUntil(competition.start) : null;
@@ -29,11 +32,31 @@ export function CompetitionCard({ competition }) {
         {competition.kind && <Badge>{competition.kind}</Badge>}
         {competition.ekpNumber && <Badge>ЕКП № {competition.ekpNumber}</Badge>}
       </div>
+      {existing.length > 0 ? (
+        <div className="card-actions">
+          {existing.map((a) => (
+            <button key={a.number} className="secondary-button" onClick={onOpenApplications}>
+              📝 Заявка № {a.number} · {a.status}
+            </button>
+          ))}
+        </div>
+      ) : (
+        onApply &&
+        status !== 'past' && (
+          <div className="card-actions">
+            <button className="primary-button" onClick={() => onApply(competition)}>
+              📝 Подать заявку
+            </button>
+          </div>
+        )
+      )}
     </div>
   );
 }
 
-export function CompetitionsPage({ model }) {
+export function CompetitionsPage({ model, user, onOpenPage }) {
+  const me = findMyAthlete(model, user);
+  const onApply = me?.isCarrier ? (c) => onOpenPage('application-form', { competitionId: c.id }) : undefined;
   const [filter, setFilter] = useState('active');
   const [query, setQuery] = useState('');
 
@@ -62,7 +85,15 @@ export function CompetitionsPage({ model }) {
       {list.length === 0 ? (
         <EmptyState icon="🏆" title="Ничего не найдено" />
       ) : (
-        list.map((c) => <CompetitionCard key={c.id} competition={c} />)
+        list.map((c) => (
+          <CompetitionCard
+            key={c.id}
+            competition={c}
+            onApply={onApply}
+            existing={applicationsForCompetition(model, c, me)}
+            onOpenApplications={() => onOpenPage('applications')}
+          />
+        ))
       )}
     </>
   );

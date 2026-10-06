@@ -1,14 +1,13 @@
-import { competitionStatus } from '../data/model.js';
-import { DataStatus, EmptyState, PageHeader } from '../components.jsx';
+import { competitionStatus, findMyAthlete } from '../data/model.js';
+import { EmptyState, PageHeader } from '../components.jsx';
 import { SheetBrowser } from '../SheetBrowser.jsx';
 import { CompetitionCard } from './CompetitionsPage.jsx';
 import { AthleteStatus, WeaponList } from './AthletesPage.jsx';
 
 const UPCOMING_ON_HOME = 3;
 
-export function HomePage({ user, model, sheets, telegramStatus, onOpenPage, onRecheckTelegram, onSendTest }) {
-  // Спортсмен, у которого в таблице указан ChatId текущего пользователя Telegram
-  const me = user ? model.athletes.find((a) => a.chatId === String(user.id)) : null;
+export function HomePage({ user, model, sheets, telegramStatus, onOpenPage, onRecheckTelegram }) {
+  const me = findMyAthlete(model, user);
   const upcoming = model.competitions.filter((c) => competitionStatus(c) !== 'past');
 
   const stats = [
@@ -20,8 +19,7 @@ export function HomePage({ user, model, sheets, telegramStatus, onOpenPage, onRe
 
   return (
     <>
-      <PageHeader title={user ? `Привет, ${user.first_name}!` : 'ZNS Mini App'} subtitle="ДОСААФ МГССК" />
-      <DataStatus sheets={sheets} />
+      <PageHeader title={me?.greetingName ? `Здравствуйте, ${me.greetingName}!` : 'ZNS Mini App'} subtitle="ДОСААФ МГССК" />
 
       {me && (
         <div className="card item-card">
@@ -64,11 +62,15 @@ export function HomePage({ user, model, sheets, telegramStatus, onOpenPage, onRe
         <p className="status">
           <b>Telegram:</b> {telegramStatus}
         </p>
-        {user ? (
-          <button className="secondary-button" onClick={onSendTest}>
-            Отправить тестовую запись в таблицу
-          </button>
-        ) : (
+        {Object.keys(model.skipped).length > 0 && (
+          <p className="status">
+            <b>Пропущены строки без ID:</b>{' '}
+            {Object.entries(model.skipped)
+              .map(([sheet, count]) => `${sheet} — ${count}`)
+              .join(', ')}
+          </p>
+        )}
+        {!user && (
           <button className="secondary-button" onClick={onRecheckTelegram}>
             🔄 Перепроверить окружение
           </button>

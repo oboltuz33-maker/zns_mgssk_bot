@@ -1,14 +1,26 @@
 // Общие элементы интерфейса страниц
 
-const DATE_FORMAT = { day: '2-digit', month: '2-digit', year: 'numeric' };
+// Даты показываются по московскому времени независимо от часового пояса телефона
+const DATE_FORMAT = { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'Europe/Moscow' };
+const DATE_TIME_FORMAT = { ...DATE_FORMAT, hour: '2-digit', minute: '2-digit' };
 
 export const formatDate = (date) => (date ? date.toLocaleDateString('ru-RU', DATE_FORMAT) : '—');
 
+export const formatDateTime = (date) => (date ? `${date.toLocaleString('ru-RU', DATE_TIME_FORMAT)} МСК` : '—');
+
 export const formatRange = (start, end) => {
   if (!start) return '—';
-  if (!end || start.toDateString() === end.toDateString()) return formatDate(start);
+  if (!end || formatDate(start) === formatDate(end)) return formatDate(start);
   return `${formatDate(start)} – ${formatDate(end)}`;
 };
+
+// Подтверждение в стиле Telegram, вне Telegram — обычный confirm
+export const confirmAction = (text) =>
+  new Promise((resolve) => {
+    const tg = window.Telegram?.WebApp;
+    if (tg?.initData && tg.isVersionAtLeast?.('6.2')) tg.showConfirm(text, resolve);
+    else resolve(window.confirm(text));
+  });
 
 // Поиск без учёта регистра по нескольким полям
 export const matches = (query, ...fields) => {

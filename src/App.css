@@ -3,6 +3,7 @@
 }
 
 .page {
+  position: relative;
   max-width: 640px;
   margin: 0 auto;
   /* место под нижнее меню; safe area снизу уже учтена в #root */
@@ -143,6 +144,12 @@
 .badge-accent { background: rgba(0, 136, 204, 0.15); color: var(--tg-theme-button-color, #0088cc); }
 .badge-muted { color: var(--hint); }
 
+/* Тёмная тема Telegram (атрибут ставится в main.jsx по WebApp.colorScheme): светлее текст, плотнее фон */
+[data-color-scheme='dark'] .badge-success { background: rgba(76, 200, 110, 0.2); color: #7ee2a0; }
+[data-color-scheme='dark'] .badge-warning { background: rgba(255, 190, 60, 0.2); color: #ffd27a; }
+[data-color-scheme='dark'] .sheet-error,
+[data-color-scheme='dark'] .secondary-button.danger { color: #ff7a7a; }
+
 .list {
   margin-top: 8px;
   border-radius: 14px;
@@ -200,7 +207,7 @@
 
 .empty-icon { font-size: 40px; }
 .empty-title { font-weight: 600; color: var(--text); margin-top: 8px; }
-.empty-text { font-size: 14px; margin-top: 4px; }
+.empty-text { font-size: 14px; margin-top: 4px; white-space: pre-line; }
 
 .service {
   margin-top: 24px;
@@ -309,11 +316,14 @@ a {
   color: var(--hint);
 }
 
-.build-info {
-  margin-top: 16px;
-  text-align: center;
-  font-size: 12px;
-  color: var(--hint);
+.help-list {
+  margin: 4px 0 0;
+  padding-left: 20px;
+  font-size: 14px;
+}
+
+.help-list li + li {
+  margin-top: 6px;
 }
 
 /* Нижнее меню */
@@ -354,8 +364,11 @@ a {
   transition: background 0.15s;
 }
 
-.nav-item:hover {
-  background: var(--secondary-bg);
+/* Подсветка при наведении — только там, где есть мышь: на сенсорных экранах она «залипает» после нажатия */
+@media (hover: hover) {
+  .nav-item:hover {
+    background: var(--secondary-bg);
+  }
 }
 
 .nav-icon {
@@ -373,7 +386,7 @@ a {
 
 .nav-label {
   max-width: 100%;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
@@ -389,4 +402,287 @@ a {
   background: var(--tg-theme-button-color, #0088cc);
   color: var(--tg-theme-button-text-color, #fff);
   border-color: transparent;
+}
+
+/* Главная кнопка меню: крупная, приподнятая, всегда в цвете кнопки */
+.nav-item.primary {
+  position: relative;
+  margin-top: -26px;
+}
+
+.nav-item.primary:hover {
+  background: none;
+}
+
+.nav-item.primary .nav-icon {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  border: 4px solid var(--tg-theme-bottom-bar-bg-color, var(--bg));
+  background: var(--tg-theme-button-color, #0088cc);
+  color: var(--tg-theme-button-text-color, #fff);
+  font-size: 26px;
+  box-shadow: 0 4px 12px rgba(0, 136, 204, 0.45);
+  transition: transform 0.15s;
+}
+
+.nav-item.primary:active .nav-icon {
+  transform: scale(0.94);
+}
+
+.nav-item.primary .nav-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--tg-theme-button-color, #0088cc);
+}
+
+.nav-item.primary.active .nav-icon {
+  box-shadow: 0 0 0 3px rgba(0, 136, 204, 0.3), 0 4px 12px rgba(0, 136, 204, 0.45);
+}
+
+.page-footer {
+  margin-top: 24px;
+}
+
+/* Экран входа */
+.auth {
+  max-width: 420px;
+  margin: 0 auto;
+}
+
+.auth-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  max-width: 320px;
+  margin: 8px auto 0;
+}
+
+.auth-center {
+  text-align: center;
+}
+
+.form-field {
+  display: block;
+  margin-top: 12px;
+}
+
+.form-field span {
+  display: block;
+  font-size: 13px;
+  color: var(--hint);
+  margin-bottom: 4px;
+}
+
+/* Действия в карточке и мастер заявки */
+.card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.card-actions .primary-button,
+.card-actions .secondary-button {
+  margin-top: 0;
+}
+
+.secondary-button.danger {
+  color: #d33;
+}
+
+.wide-button {
+  width: 100%;
+  margin: 0 0 12px;
+}
+
+.wizard-progress {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.wizard-progress span {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--secondary-bg);
+}
+
+.wizard-progress span.done {
+  background: var(--tg-theme-button-color, #0088cc);
+}
+
+.wizard-warning {
+  border: 1px solid rgba(240, 160, 0, 0.5);
+}
+
+.wizard-hint {
+  text-align: center;
+  margin-top: 12px;
+}
+
+.wizard-message {
+  margin: 0 0 8px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--hint);
+}
+
+.wizard-message.error {
+  color: #d33;
+  font-weight: 600;
+}
+
+[data-color-scheme='dark'] .wizard-message.error,
+[data-color-scheme='dark'] .invalid-text {
+  color: #ff7a7a;
+}
+
+/* Шаг не заполнен — кнопка «Далее» бледнее, но нажимается (и объясняет, чего не хватает) */
+.primary-button.incomplete {
+  opacity: 0.55;
+}
+
+/* Незаполненное место на шаге, например спортсмен без оружия */
+.card.invalid {
+  border: 2px solid #d33;
+}
+
+.invalid-text {
+  margin-top: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #d33;
+}
+
+/* Кнопки «Назад / Далее» прилипают к низу экрана (нижнего меню в мастере нет) */
+.wizard-footer {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 0 calc(12px + var(--tg-safe-area-inset-bottom, 0px));
+  margin-top: 12px;
+  background: var(--bg);
+}
+
+.wizard-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.wizard-footer button {
+  flex: 1;
+  margin-top: 0;
+  padding: 12px;
+  font-size: 15px;
+}
+
+.choice {
+  display: block;
+  width: 100%;
+  border: 2px solid transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.choice.selected {
+  border-color: var(--tg-theme-button-color, #0088cc);
+}
+
+.choice-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 0;
+  border: none;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.list .choice-row {
+  padding: 10px 14px;
+}
+
+.choice-row input[type='checkbox'] {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  accent-color: var(--tg-theme-button-color, #0088cc);
+}
+
+.review-gap {
+  margin-top: 14px;
+}
+
+/* Второстепенные кнопки внутри карточки — на фоне страницы, с рамкой, иначе сливаются с карточкой */
+.card .secondary-button,
+.list .secondary-button {
+  background: var(--bg);
+  border: 1px solid rgba(127, 127, 127, 0.25);
+}
+
+.list-item .secondary-button {
+  flex: none;
+  margin-top: 0;
+}
+
+/* Значок «?» — переход в «Помощь» */
+.help-button {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid rgba(127, 127, 127, 0.3);
+  background: var(--secondary-bg);
+  color: var(--hint);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* Мастер: убрать участника, «Изменить» на проверке, «＋» у добавляемого */
+.icon-button {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 50%;
+  background: var(--bg);
+  color: var(--hint);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.link-button {
+  flex: none;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--tg-theme-link-color, #0088cc);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.add-mark {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--tg-theme-button-color, #0088cc);
+  color: var(--tg-theme-button-text-color, #fff);
+  font-size: 14px;
 }

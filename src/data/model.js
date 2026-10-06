@@ -5,27 +5,70 @@ import { SHEET } from '../config.js';
 
 const str = (value) => String(value ?? '').trim();
 
+// Все даты в таблице — московские. Ячейка с типом «дата» приходит от Apps Script ISO-строкой
+// (точный момент времени); текст «дд.мм.гггг[ чч:мм[:сс]]» считаем московским временем (UTC+3).
+const RU_DATE = /^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:[ ,T]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/;
+const MOSCOW_UTC_OFFSET_HOURS = 3;
+
 const toDate = (value) => {
   if (!value) return null;
-  const date = new Date(value);
+  const m = str(value).match(RU_DATE);
+  const date = m
+    ? new Date(Date.UTC(+m[3], m[2] - 1, +m[1], (+m[4] || 0) - MOSCOW_UTC_OFFSET_HOURS, +m[5] || 0, +m[6] || 0))
+    : new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
+};
+
+// Календарный день по Москве в виде «гггг-мм-дд» — такие строки можно сравнивать между собой
+// и подставлять в <input type="date">
+export const moscowDay = (date) => date.toLocaleDateString('sv-SE', { timeZone: 'Europe/Moscow' });
+
+// Значения столбца «Статус» заявки (как в Apps Script). Автор может менять и удалять только «Новую»
+export const APPLICATION_STATUS = {
+  new: 'Новая',
+  inProgress: 'В работе',
+  done: 'Выполнена',
+  archived: 'Архив',
+  deleted: 'Удалена',
+};
+
+// Разделитель элементов списка в ячейке заявки (оружие, виды транспорта): «;» и перенос строки
+export const LIST_SEPARATOR = ';\n';
+const splitList = (value) => str(value).split(/;\s*/).map((s) => s.trim()).filter(Boolean);
+
+// «Иванов», «Иван», «Петрович» → «Иванов И.П.» (так спортсмен записывается в заявке)
+export const shortName = (lastName, firstName, middleName) => {
+  const initials = [firstName, middleName].filter(Boolean).map((n) => n.charAt(0).toUpperCase() + '.').join('');
+  return [lastName, initials].filter(Boolean).join(' ');
 };
 
 const rowsOf = (data, sheetName) => data?.sheets?.[sheetName]?.rows ?? [];
 
-const startOfDay = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate());
-
 // upcoming — ещё не началось, ongoing — идёт сейчас, past — завершилось
 export function competitionStatus(competition, now = new Date()) {
-  const today = startOfDay(now);
-  const start = competition.start && startOfDay(competition.start);
-  const end = competition.end ? startOfDay(competition.end) : start;
+  const today = moscowDay(now);
+  const start = competition.start && moscowDay(competition.start);
+  const end = competition.end ? moscowDay(competition.end) : start;
   if (end && end < today) return 'past';
   if (start && start <= today) return 'ongoing';
   return 'upcoming';
 }
 
+// Текущий спортсмен. Его определяет Apps Script по подписанным данным Telegram (athleteId);
+// если athleteId в данных нет (старая версия скрипта) — по ChatId пользователя
+export const findMyAthlete = (model, user) =>
+  model.athletes.find((a) => a.id === model.athleteId) ||
+  (user && model.athletes.find((a) => a.chatId === String(user.id))) ||
+  null;
+
 export function buildModel(data) {
+  // Строки без идентификатора уже отброшены при загрузке (sheets.js) — здесь только их число по листам
+  const skipped = Object.fromEntries(
+    Object.entries(data?.sheets ?? {})
+      .filter(([, sheet]) => sheet.skipped > 0)
+      .map(([name, sheet]) => [name, sheet.skipped]),
+  );
+
   const weapons = rowsOf(data, SHEET.weapons).map((r) => ({
     id: str(r['Ид']),
     title: str(r['Название']),
@@ -43,6 +86,9 @@ export function buildModel(data) {
       firstName,
       middleName,
       fullName: [lastName, firstName, middleName].filter(Boolean).join(' '),
+      shortName: shortName(lastName, firstName, middleName),
+      // Обращение к спортсмену: «Имя Отчество», без отчества — «Имя Фамилия»
+      greetingName: (middleName ? [firstName, middleName] : [firstName, lastName]).filter(Boolean).join(' '),
       phone: str(r['Телефон']),
       chatId: str(r['ChatId']),
       status: str(r['Статус']),
@@ -75,19 +121,44 @@ export function buildModel(data) {
     }))
     .sort((a, b) => (a.start?.getTime() ?? Infinity) - (b.start?.getTime() ?? Infinity));
 
-  const applications = rowsOf(data, SHEET.applications).map((r) => ({
-    number: str(r['№']),
-    fullName: str(r['ФИО']),
-    weapon: str(r['Оружие']),
-    transportStart: toDate(r['Сроки перевозки начало']),
-    transportEnd: toDate(r['Сроки перевозки окончание']),
-    transport: str(r['Вид транспорта']),
-    competitionKind: str(r['Вид соревнования']),
-    competitionTitle: str(r['Название соревнования']),
-    address: str(r['Адрес']),
-    status: str(r['Статус']),
-    createdAt: toDate(r['CreatedAt']),
-  }));
+  const applications = rowsOf(data, SHEET.applications)
+    .map((r) => ({
+      number: str(r['№']),
+      fullName: str(r['ФИО']),
+      weapon: str(r['Оружие']),
+      transportStart: toDate(r['Сроки перевозки начало']),
+      transportEnd: toDate(r['Сроки перевозки окончание']),
+      transport: str(r['Вид транспорта']),
+      competitionKind: str(r['Вид соревнования']),
+      competitionTitle: str(r['Название соревнования']),
+      ekpNumber: str(r['Номер в ЕКП']),
+      ekpStart: toDate(r['Сроки по ЕКП начало']),
+      ekpEnd: toDate(r['Сроки по ЕКП окончание']),
+      address: str(r['Адрес']),
+      status: str(r['Статус']),
+      canEdit: str(r['Статус']) === APPLICATION_STATUS.new,
+      // Элементы списков: «Фамилия И.О. - Название - Номер» и названия видов транспорта
+      weaponLines: splitList(r['Оружие']),
+      transportList: splitList(r['Вид транспорта']),
+      // CreatedBy — ID спортсмена, создавшего заявку; CreatedAt — момент создания (московское время)
+      createdById: str(r['CreatedBy']),
+      author: athleteById.get(str(r['CreatedBy'])) ?? null,
+      createdAt: toDate(r['CreatedAt']),
+    }))
+    // Новые заявки сверху
+    .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
 
-  return { competitions, athletes, weapons, applications };
+  // Справочник видов транспорта: первый столбец листа — название
+  const transportSheet = data?.sheets?.[SHEET.transportTypes];
+  const transportTypes = transportSheet ? transportSheet.rows.map((r) => str(r[transportSheet.headers[0]])) : [];
+
+  return {
+    competitions,
+    athletes,
+    weapons,
+    applications,
+    transportTypes,
+    skipped,
+    athleteId: data?.athleteId ?? null,
+  };
 }

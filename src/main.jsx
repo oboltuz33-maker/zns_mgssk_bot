@@ -11,6 +11,13 @@ window.Telegram ??= { WebApp }
 
 checkForUpdate()
 
+// Светлая или тёмная схема Telegram — для цветов, которые не берутся из темы (см. App.css)
+const applyColorScheme = () => {
+  document.documentElement.dataset.colorScheme = WebApp.colorScheme || 'light'
+}
+applyColorScheme()
+WebApp.onEvent('themeChanged', applyColorScheme)
+
 createRoot(document.getElementById('root')).render(
   <StrictMode>
     <App />
