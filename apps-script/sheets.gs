@@ -1,8 +1,9 @@
 /**
  * Бэкенд Mini App: чтение листов таблицы и авторизация спортсменов.
  *
- * GET  ?action=sheets&initData=<Telegram.WebApp.initData>[&names=A,B]
+ * GET  ?action=sheets&initData=<Telegram.WebApp.initData>[&names=A,B][&fresh=1]
  *      Листы одним запросом — Mini App фильтрует их у себя, чтобы не расходовать лимиты.
+ *      fresh=1 — прочитать таблицу мимо кэша (кнопка «Обновить» в приложении).
  * POST { action: 'linkPhone', initData, contact }
  *      Привязка по номеру телефона: contact — подписанный ответ Telegram.WebApp.requestContact.
  * POST { action: 'register', initData, lastName, firstName, middleName, contact }
@@ -177,12 +178,12 @@ const NAME_MAX_LENGTH = 100;
 const REQUEST_CACHE_SECONDS = 10 * 60;
 
 // Кэш листов для отдачи приложению (doGet): экономит время выполнения и лимиты Apps Script.
-// Сбрасывается при записи через приложение и при ручной правке листа; иначе живёт столько секунд
+// Устаревает при записи через приложение и при ручной правке листа (см. «Работа с листами»); иначе живёт столько секунд
 const SHEET_CACHE_SECONDS = 5 * 60;
 // Лист больше этого размера (символов JSON) в кэш не кладётся — у CacheService предел 100 КБ на значение
 const SHEET_CACHE_MAX_CHARS = 45000;
 
-// В какие листы пишет каждое действие doPost — их кэш сбрасывается после действия
+// В какие листы пишет каждое действие doPost — после действия у них новое поколение кэша
 const WRITES_SHEETS = {
   linkPhone: [SHEET.athletes],
   register: [SHEET.athletes],
@@ -214,6 +215,7 @@ function doGet(e) {
     if (!user) return telegramDenied_(params.initData);
 
     const ss = spreadsheet_();
+    freshRead_ = params.fresh === '1';
     const athlete = findAthlete_(athletesTable_(ss, true), function (a) { return a.chatId === String(user.id); });
     const denied = accessDenied_(athlete);
     if (denied) return denied;
@@ -687,24 +689,43 @@ function unassignWeapon_(user, weaponId) {
 // ---------- Работа с листами ----------
 // Чтение листа — самая долгая часть вызова скрипта. Поэтому:
 //  - за один вызов каждый лист читается из таблицы не больше одного раза (sheetValuesMemo_);
-//  - для отдачи данных приложению (doGet) листы берутся из CacheService на SHEET_CACHE_SECONDS.
-//    Кэш листа сбрасывается при любой записи через приложение и при ручной правке листа (onSheetEdit);
-//    правки другими скриптами (например, перенос соревнований в архив) видны не позже чем через это время.
+//  - для отдачи данных приложению (doGet) листы берутся из CacheService на SHEET_CACHE_SECONDS;
 //  - запись (doPost) всегда работает со свежими данными таблицы, не из кэша.
+//
+// Согласованность кэша с таблицей — через поколения. У каждого листа в кэше есть метка поколения
+// ('gen:<лист>'), копия листа хранится под ключом с этой меткой ('sheet:<лист>:<метка>').
+// Запись через приложение (после SpreadsheetApp.flush) и ручная правка (onSheetEdit) ставят листу новую метку —
+// старая копия перестаёт находиться. Читатель узнаёт метку ДО чтения таблицы и кладёт копию под неё же:
+// если запись случилась во время чтения, устаревшая копия ляжет под уже ненужную метку и никому не попадётся.
+// Итог: загрузка, начатая после завершения записи, всегда видит эту запись. Правки другими скриптами
+// (например, перенос соревнований в архив) скрипт не замечает — они видны через SHEET_CACHE_SECONDS
+// или сразу по кнопке «Обновить» (fresh=1).
 
 // Значения листов, уже прочитанных в этом вызове скрипта (глобальные переменные живут один вызов)
 const sheetValuesMemo_ = {};
+
+// Принудительное обновление (GET с fresh=1 — кнопки «Обновить» и «Проверить снова» в приложении):
+// таблица читается мимо кэша, а кэш заполняется свежими данными. Так правки в таблице видны сразу,
+// даже если триггер onSheetEdit не установлен
+let freshRead_ = false;
+
+// Метка поколения живёт дольше копий листов (6 часов — максимум CacheService). Пропала — создаётся новая,
+// а листы просто перечитываются из таблицы
+const SHEET_GENERATION_SECONDS = 6 * 60 * 60;
 
 // Значения листа вместе со строкой заголовков, без пустых столбцов справа от последнего заголовка.
 // fromCache — можно взять из CacheService (только для чтения)
 function sheetValues_(ss, name, fromCache) {
   if (sheetValuesMemo_[name]) return sheetValuesMemo_[name];
-  let values = fromCache ? cacheGetSheet_(name) : null;
+  // Метки и копии берутся из кэша до чтения таблицы (см. выше). При принудительном обновлении (fresh)
+  // копию не используем, но свежие данные под текущей меткой кладём
+  const cached = fromCache ? sheetCache_() : null;
+  let values = cached && !freshRead_ ? cached.values[name] : null;
   if (!values) {
     const sheet = ss.getSheetByName(name);
     if (!sheet) throw new Error('Нет листа «' + name + '»');
     values = trimEmptyColumns_(sheet.getDataRange().getValues());
-    if (fromCache) cachePutSheet_(name, values);
+    if (cached && cached.generations[name]) cachePutSheet_(ss, name, cached.generations[name], values);
   }
   sheetValuesMemo_[name] = values;
   return values;
@@ -718,30 +739,76 @@ function trimEmptyColumns_(values) {
   return width === headers.length ? values : values.map(function (row) { return row.slice(0, width); });
 }
 
-// Кэш листа: даты сохраняются как { $d: время }, чтобы после чтения из кэша снова стать датами
-function cachePutSheet_(name, values) {
+const generationKey_ = function (name) { return 'gen:' + name; };
+const sheetKey_ = function (name, generation) { return 'sheet:' + name + ':' + generation; };
+
+// Метки поколений и копии всех листов приложения — двумя обращениями к CacheService за вызов.
+// Все копии берутся в один момент, поэтому они согласованы между собой
+let sheetCacheMemo_ = null;
+function sheetCache_() {
+  if (sheetCacheMemo_) return sheetCacheMemo_;
+  const cache = CacheService.getScriptCache();
+  const generations = cache.getAll(APP_SHEETS.map(generationKey_));
+  const missing = {};
+  const result = { generations: {}, values: {} };
+  APP_SHEETS.forEach(function (name) {
+    let generation = generations[generationKey_(name)];
+    if (!generation) generation = missing[generationKey_(name)] = newId_();
+    result.generations[name] = generation;
+  });
+  if (Object.keys(missing).length) cache.putAll(missing, SHEET_GENERATION_SECONDS);
+
+  const copies = cache.getAll(APP_SHEETS.map(function (name) { return sheetKey_(name, result.generations[name]); }));
+  APP_SHEETS.forEach(function (name) {
+    const json = copies[sheetKey_(name, result.generations[name])];
+    if (!json) return;
+    // Даты в кэше хранятся как { $d: время }
+    result.values[name] = JSON.parse(json).map(function (row) {
+      return row.map(function (cell) { return cell && cell.$d !== undefined ? new Date(cell.$d) : cell; });
+    });
+  });
+  sheetCacheMemo_ = result;
+  return result;
+}
+
+function cachePutSheet_(ss, name, generation, values) {
   const json = JSON.stringify(values.map(function (row) {
     return row.map(function (cell) { return cell instanceof Date ? { $d: cell.getTime() } : cell; });
   }));
-  if (json.length > SHEET_CACHE_MAX_CHARS) return; // слишком большой для CacheService — читаем таблицу
+  // Слишком большой для CacheService — лист будет читаться из таблицы при каждой загрузке
+  if (json.length > SHEET_CACHE_MAX_CHARS) {
+    logOversizedSheet_(ss, name, json.length);
+    return;
+  }
   try {
-    CacheService.getScriptCache().put('sheet:' + name, json, SHEET_CACHE_SECONDS);
+    CacheService.getScriptCache().put(sheetKey_(name, generation), json, SHEET_CACHE_SECONDS);
   } catch (err) {
     console.error('Не удалось сохранить лист «' + name + '» в кэш: ' + err);
   }
 }
 
-function cacheGetSheet_(name) {
-  const json = CacheService.getScriptCache().get('sheet:' + name);
-  if (!json) return null;
-  return JSON.parse(json).map(function (row) {
-    return row.map(function (cell) { return cell && cell.$d !== undefined ? new Date(cell.$d) : cell; });
+// Предупреждение в «_Журнал», что лист перерос кэш (загрузка приложения замедлится) — не чаще раза в OVERSIZE_LOG_SECONDS
+const OVERSIZE_LOG_SECONDS = 6 * 60 * 60;
+function logOversizedSheet_(ss, name, chars) {
+  const cache = CacheService.getScriptCache();
+  const key = 'oversize:' + name;
+  if (cache.get(key)) return;
+  cache.put(key, '1', OVERSIZE_LOG_SECONDS);
+  log_(ss, 'Лист не помещается в кэш', { id: '' }, {
+    text: 'Лист «' + name + '»: ' + chars + ' символов при пределе ' + SHEET_CACHE_MAX_CHARS +
+      '. Он читается из таблицы при каждой загрузке приложения — загрузка медленнее и тратит лимиты Apps Script. ' +
+      'Варианты — в IMPROVEMENTS.md (сжатие и деление копии листа)',
   });
 }
 
-// После записи в лист (или ручной правки) его кэш устарел
+// После записи в лист (или ручной правки) его копия в кэше устарела — даём листу новое поколение.
+// flush — чтобы запись точно оказалась в таблице раньше, чем кто-то прочитает её под новой меткой
 function invalidateSheets_(names) {
-  CacheService.getScriptCache().removeAll(names.map(function (name) { return 'sheet:' + name; }));
+  SpreadsheetApp.flush();
+  const generations = {};
+  names.forEach(function (name) { generations[generationKey_(name)] = newId_(); });
+  CacheService.getScriptCache().putAll(generations, SHEET_GENERATION_SECONDS);
+  sheetCacheMemo_ = null;
 }
 
 // Лист как таблица: заголовки, строки с непустым ID (первый столбец) и доступ к ячейкам по названию столбца

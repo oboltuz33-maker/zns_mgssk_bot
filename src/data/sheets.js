@@ -79,13 +79,15 @@ export function clearCache() {
   }
 }
 
-export async function fetchSheets() {
+// fresh — попросить Apps Script прочитать таблицу мимо своего кэша (кнопки «Обновить», «Проверить снова»)
+export async function fetchSheets({ fresh = false } = {}) {
   const initData = telegramInitData();
   if (!initData) throw new AccessDeniedError('no-telegram', 'Откройте приложение из Telegram');
 
   const url = new URL(GOOGLE_SCRIPT_URL);
   url.searchParams.set('action', 'sheets');
   url.searchParams.set('initData', initData);
+  if (fresh) url.searchParams.set('fresh', '1');
   if (SHEETS_PARAM) url.searchParams.set('names', SHEETS_PARAM);
 
   // Адрес запроса всегда одинаковый — запрещаем браузеру отдавать сохранённый ответ вместо свежего

@@ -117,14 +117,14 @@ export function DataStatus({ sheets }) {
   let text = 'Нет данных';
   if (loading) text = 'Загрузка таблицы…';
   else if (savedAt) {
-    text = `Данные от ${new Date(savedAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`;
+    text = `Данные от ${new Date(savedAt).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
   }
 
   return (
     <>
       <div className="sheet-toolbar">
         <span className="sheet-meta">{text}</span>
-        <button className="secondary-button" onClick={refresh} disabled={loading}>
+        <button className="secondary-button" onClick={() => refresh({ fresh: true })} disabled={loading}>
           🔄 Обновить
         </button>
       </div>

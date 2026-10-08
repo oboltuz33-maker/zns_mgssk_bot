@@ -147,7 +147,7 @@ function App() {
           key={sheets.accessDenied.reason + sheets.accessDenied.message}
           access={sheets.accessDenied}
           user={user}
-          onAccessGranted={sheets.refresh}
+          onAccessGranted={() => sheets.refresh({ fresh: true })}
         />
       );
     } else if (sheets.error) {
@@ -155,7 +155,7 @@ function App() {
         <>
           <EmptyState icon="⚠️" title="Не удалось загрузить данные">{sheets.error}</EmptyState>
           <div className="auth-actions">
-            <button className="primary-button" onClick={sheets.refresh} disabled={sheets.loading}>
+            <button className="primary-button" onClick={() => sheets.refresh({ fresh: true })} disabled={sheets.loading}>
               🔄 Повторить
             </button>
           </div>

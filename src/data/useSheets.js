@@ -12,13 +12,14 @@ export function useSheets() {
   // сохранения и вернуть таблицу без него — такой ответ не должен затереть только что сохранённое
   const lastPatchAt = useRef(0);
 
-  const refresh = useCallback(async () => {
+  // refresh({ fresh: true }) — по явной просьбе пользователя: данные читаются из таблицы мимо кэша скрипта
+  const refresh = useCallback(async ({ fresh = false } = {}) => {
     const startedAt = Date.now();
     setState((s) => ({ ...s, loading: true, error: null }));
     try {
-      const data = await fetchSheets();
+      const data = await fetchSheets({ fresh });
       if (startedAt < lastPatchAt.current) {
-        // Устаревший ответ: следующая загрузка (её запускает тот, кто правил) принесёт актуальные данные
+        // Устаревший ответ отбрасываем: правка на месте уже актуальна, остальное обновится при следующей загрузке
         setState((s) => ({ ...s, loading: false }));
         return;
       }
