@@ -7,10 +7,13 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:test": "vite build --mode test --outDir dist-test",
     "lint": "oxlint src",
     "preview": "vite preview",
     "predeploy": "npm run build",
-    "deploy": "gh-pages -d dist"
+    "deploy": "gh-pages -d dist --remove \"assets/**\"",
+    "predeploy:test": "npm run build:test",
+    "deploy:test": "gh-pages -d dist-test --dest test"
   },
   "dependencies": {
     "@twa-dev/sdk": "^8.0.2",

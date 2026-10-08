@@ -1,5 +1,5 @@
 import { postAction } from './api.js';
-import { DEFAULT_TRANSPORT } from '../config.js';
+import { DEFAULT_TRANSPORT, storageKey } from '../config.js';
 
 // Черновик заявки — то, что выбирает перевозчик в мастере:
 // { number, competitionId, items: [{ athleteId, weaponIds }], transport: [названия] }
@@ -130,7 +130,7 @@ export const applicationsForCompetition = (model, competition, me) =>
 // Незаконченная новая заявка сохраняется в localStorage, чтобы её можно было продолжить после закрытия
 // приложения или обрыва связи. Хранится отдельно для каждого спортсмена, неделю.
 
-const draftKey = (me) => `zns-application-draft:${me.id}`;
+const draftKey = (me) => storageKey(`zns-application-draft:${me.id}`);
 const DRAFT_MAX_AGE_MS = 7 * DAY_MS;
 
 export function saveDraftLocally(me, draft, step) {

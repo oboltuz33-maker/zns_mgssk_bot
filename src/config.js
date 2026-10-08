@@ -1,7 +1,14 @@
 // Настройки приложения
 
-// Веб-приложение Google Apps Script, привязанное к таблице
-export const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxLCEk-qSvy3ZDf6A15TOT7rIQOrtfRfVbRQvh3X907Trjh6PojNBA7HryTZEXu60cxxw/exec';
+// Веб-приложение Google Apps Script, привязанное к таблице. Своё у каждого окружения — см. .env.production и .env.test
+export const GOOGLE_SCRIPT_URL = import.meta.env.VITE_GOOGLE_SCRIPT_URL;
+
+// Метка окружения («ТЕСТ»), пусто — рабочее
+export const ENV_LABEL = import.meta.env.VITE_ENV_LABEL || '';
+
+// Рабочее и тестовое приложения открываются с одного домена (github.io) и делят localStorage —
+// ключи тестового получают приставку, чтобы его данные не попадали в рабочее. У рабочего ключи прежние
+export const storageKey = (name) => (ENV_LABEL ? `test:${name}` : name);
 
 // Через сколько минут сохранённые на устройстве листы считаются устаревшими
 // и перезапрашиваются у Apps Script

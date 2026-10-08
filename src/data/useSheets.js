@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AccessDeniedError, clearCache, fetchSheets, readCache, writeCache } from './sheets.js';
 
-// Сразу отдаёт листы из кэша (если есть), а если кэш устарел — тихо подгружает свежие
+// Сразу отдаёт листы из кэша на устройстве (если есть) и тихо подгружает свежие
 export function useSheets() {
   const [state, setState] = useState(() => {
     const cached = readCache();
@@ -48,8 +48,21 @@ export function useSheets() {
     });
   }, []);
 
+  // При открытии — сразу показываем сохранённое на устройстве и в фоне загружаем свежее: сохранённое могло
+  // устареть (правки в таблице, смена записи спортсмена). При возврате в приложение (Telegram Desktop прячет
+  // окно, а не закрывает) — загружаем, если с прошлой загрузки прошло больше SHEETS_CACHE_TTL_MINUTES
   useEffect(() => {
-    if (!readCache()?.isFresh) refresh();
+    refresh();
+    const onReturn = () => {
+      if (document.visibilityState === 'visible' && !readCache()?.isFresh) refresh();
+    };
+    document.addEventListener('visibilitychange', onReturn);
+    const webApp = window.Telegram?.WebApp;
+    webApp?.onEvent?.('activated', onReturn);
+    return () => {
+      document.removeEventListener('visibilitychange', onReturn);
+      webApp?.offEvent?.('activated', onReturn);
+    };
   }, [refresh]);
 
   return { ...state, refresh, patch };

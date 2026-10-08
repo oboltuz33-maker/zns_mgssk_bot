@@ -1,4 +1,4 @@
-import { GOOGLE_SCRIPT_URL, SHEETS_CACHE_TTL_MINUTES, SHEETS_TO_LOAD } from '../config.js';
+import { GOOGLE_SCRIPT_URL, SHEETS_CACHE_TTL_MINUTES, SHEETS_TO_LOAD, storageKey } from '../config.js';
 import { fetchWithRetry } from './network.js';
 
 const CACHE_TTL_MS = SHEETS_CACHE_TTL_MINUTES * 60 * 1000;
@@ -8,7 +8,7 @@ const SHEETS_PARAM = SHEETS_TO_LOAD.join(',');
 // Листы таблицы загружаются одним запросом к Apps Script и хранятся в localStorage,
 // чтобы не тратить лимиты на каждое открытие страницы или фильтрацию.
 // v3: данные выдаются под конкретного пользователя Telegram — кэш привязан к его id
-const CACHE_KEY = 'zns-sheets-v3';
+const CACHE_KEY = storageKey('zns-sheets-v3');
 
 // Подписанные данные пользователя Telegram: по ним Apps Script определяет спортсмена
 // и отдаёт только его заявки. Вне Telegram их нет — доступа к данным тоже нет.
@@ -83,6 +83,8 @@ export function clearCache() {
 export async function fetchSheets({ fresh = false } = {}) {
   const initData = telegramInitData();
   if (!initData) throw new AccessDeniedError('no-telegram', 'Откройте приложение из Telegram');
+  // Окружение собрано без адреса скрипта (например, не заполнен .env.test)
+  if (!GOOGLE_SCRIPT_URL) throw new Error('Не задан адрес Apps Script — VITE_GOOGLE_SCRIPT_URL в файле .env окружения');
 
   const url = new URL(GOOGLE_SCRIPT_URL);
   url.searchParams.set('action', 'sheets');

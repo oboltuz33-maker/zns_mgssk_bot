@@ -32,13 +32,19 @@
  *
  * Уведомления: при ручной смене статуса спортсмена на «Подтвержден» и статуса заявки на «В работе» /
  * «Выполнена» бот пишет спортсмену (триггер onSheetEdit; создаётся один раз функцией installTriggers).
+ * Настройка окружения и проверка — функции раздела «Настройка окружения» (checkSetup, setupMenuButton, …).
  *
  * Ответы: status = success | unregistered | pending | forbidden | expired | not_found | conflict | error
  * (expired — подпись Telegram верна, но приложение открыто больше INIT_DATA_MAX_AGE_SECONDS назад).
  * События входа пишутся в журнал выполнения и в служебный лист «_Журнал».
  *
- * Токен бота хранится в свойствах скрипта, а не в коде:
- * «Настройки проекта» (⚙️) → «Свойства скрипта» → BOT_TOKEN = <токен от @BotFather>.
+ * Настройки окружения хранятся в свойствах скрипта, а не в коде, — поэтому один и тот же код работает
+ * и в рабочем, и в тестовом окружении (у каждого свой бот, своя таблица и свой скрипт):
+ * «Настройки проекта» (⚙️) → «Свойства скрипта»:
+ *   BOT_TOKEN    = <токен от @BotFather>;
+ *   MINI_APP_URL = <адрес приложения> — для кнопки «Открыть приложение» в уведомлениях бота
+ *                  (рабочее: https://oboltuz33-maker.github.io/zns_mgssk_bot/, тестовое: …/zns_mgssk_bot/test/).
+ *                  Не задан — уведомления уходят без кнопки.
  *
  * Первая строка листа — заголовки, первый столбец — ID строки.
  * Приложению отдаются только листы из APP_SHEETS.
@@ -197,11 +203,14 @@ const WRITES_SHEETS = {
 // в сообщения пользователю, когда без администратора не обойтись. Пусто — не показывается.
 const ADMIN_CONTACT = '';
 
-// Адрес Mini App — для кнопки «Открыть приложение» в уведомлениях бота
-const MINI_APP_URL = 'https://oboltuz33-maker.github.io/zns_mgssk_bot/';
 
 // Статусы заявки, о смене на которые бот сообщает автору заявки
 const NOTIFY_APPLICATION_STATUSES = [APPLICATION_STATUS.inProgress, APPLICATION_STATUS.done];
+
+// Листы, где первый столбец — ID строки и он ставится сам: строке, внесённой вручную, при правке выдаётся ID
+// (generateShortId). Не входят: «Заявки» (№ ставит скрипт), «Спортсмен/Оружие» (первый столбец — ID спортсмена),
+// «Виды транспорта» (первый столбец — название)
+const AUTO_ID_SHEETS = [SHEET.athletes, SHEET.competitions, SHEET.weapons];
 
 // ---------- Точки входа ----------
 
@@ -216,7 +225,7 @@ function doGet(e) {
 
     const ss = spreadsheet_();
     freshRead_ = params.fresh === '1';
-    const athlete = findAthlete_(athletesTable_(ss, true), function (a) { return a.chatId === String(user.id); });
+    const athlete = findUser_(ss, athletesTable_(ss, true), user);
     const denied = accessDenied_(athlete);
     if (denied) return denied;
     return readSheets_(ss, params.names, athlete.id);
@@ -298,7 +307,7 @@ function accessResult_(athlete) {
 function linkPhone_(user, contactResponse) {
   const ss = spreadsheet_();
   const table = athletesTable_(ss);
-  const linked = findAthlete_(table, function (a) { return a.chatId === String(user.id); });
+  const linked = findUser_(ss, table, user);
   if (linked) return accessResult_(linked);
 
   const phone = verifiedPhone_(contactResponse, user);
@@ -347,7 +356,7 @@ function linkPhone_(user, contactResponse) {
 function register_(user, body) {
   const ss = spreadsheet_();
   const table = athletesTable_(ss);
-  const linked = findAthlete_(table, function (a) { return a.chatId === String(user.id); });
+  const linked = findUser_(ss, table, user);
   if (linked) return accessResult_(linked);
 
   const phone = verifiedPhone_(body.contact, user);
@@ -461,6 +470,40 @@ function athletesTable_(ss, fromCache) {
   };
 }
 
+// Запись спортсмена пользователя Telegram (по ChatId). Если строк с этим ChatId несколько (дубль —
+// например, запись пересоздали, а старую не удалили), берётся самая подходящая: подтверждённый перевозчик,
+// затем подтверждённый, затем ждущий подтверждения, затем первая. О дубле — запись в «_Журнал»
+function findUser_(ss, table, user) {
+  const chatId = String(user.id);
+  const matches = table.athletes.filter(function (a) { return a.chatId === chatId; });
+  if (matches.length < 2) return matches[0] || null;
+
+  const rank = function (a) {
+    if (a.status === ATHLETE_STATUS.confirmed) return a.isCarrier ? 0 : 1;
+    return a.status === ATHLETE_STATUS.pending ? 2 : 3;
+  };
+  const chosen = matches.slice().sort(function (a, b) { return rank(a) - rank(b) || a.row - b.row; })[0];
+  logDuplicateChatId_(ss, user, matches, chosen);
+  return chosen;
+}
+
+// Не чаще раза в DUPLICATE_LOG_SECONDS на пользователя — дубль виден при каждом открытии приложения
+const DUPLICATE_LOG_SECONDS = 6 * 60 * 60;
+function logDuplicateChatId_(ss, user, matches, chosen) {
+  const cache = CacheService.getScriptCache();
+  const key = 'duplicate-chat:' + user.id;
+  if (cache.get(key)) return;
+  cache.put(key, '1', DUPLICATE_LOG_SECONDS);
+  log_(ss, 'Дубль ChatId', user, {
+    athleteId: chosen.id,
+    text: 'ChatId ' + user.id + ' указан в нескольких строках «' + SHEET.athletes + '»: ' +
+      matches.map(function (a) {
+        return 'строка ' + a.row + ' (' + (a.fullName || a.id) + ', ' + (a.status || 'без статуса') + (a.isCarrier ? ', перевозчик' : '') + ')';
+      }).join('; ') +
+      '. Используется строка ' + chosen.row + '. Удалите лишние строки или очистите в них ChatId',
+  });
+}
+
 function findAthlete_(table, predicate) {
   for (let i = 0; i < table.athletes.length; i++) {
     if (predicate(table.athletes[i])) return table.athletes[i];
@@ -528,7 +571,7 @@ function deleteApplication_(user, number) {
 
 // Автор заявки — подтверждённый спортсмен-перевозчик
 function requireCarrier_(ss, user) {
-  const athlete = findAthlete_(athletesTable_(ss), function (a) { return a.chatId === String(user.id); });
+  const athlete = findUser_(ss, athletesTable_(ss), user);
   const denied = accessDenied_(athlete);
   if (denied) throw userError_(denied.message);
   if (!athlete.isCarrier) throw userError_('Создавать заявки могут только перевозчики');
@@ -628,7 +671,7 @@ function nextApplicationNumber_(ss, table) {
 // Одна единица может быть закреплена за несколькими спортсменами.
 function assignWeapon_(user, weaponId) {
   const ss = spreadsheet_();
-  const athlete = findAthlete_(athletesTable_(ss), function (a) { return a.chatId === String(user.id); });
+  const athlete = findUser_(ss, athletesTable_(ss), user);
   const denied = accessDenied_(athlete);
   if (denied) throw userError_(denied.message);
 
@@ -659,7 +702,7 @@ function assignWeapon_(user, weaponId) {
 // На уже поданные заявки не влияет — в них оружие записано текстом.
 function unassignWeapon_(user, weaponId) {
   const ss = spreadsheet_();
-  const athlete = findAthlete_(athletesTable_(ss), function (a) { return a.chatId === String(user.id); });
+  const athlete = findUser_(ss, athletesTable_(ss), user);
   const denied = accessDenied_(athlete);
   if (denied) throw userError_(denied.message);
 
@@ -928,10 +971,11 @@ function verifySigned_(query) {
   return { fields: fields };
 }
 
-// Токен бота из свойств скрипта — читается один раз за вызов
+// Токен бота из свойств скрипта — читается один раз за вызов. Пробелы и переносы по краям (частая ошибка
+// при вставке) отбрасываются — иначе подпись Telegram не сойдётся
 let botTokenMemo_;
 function botToken_() {
-  if (botTokenMemo_ === undefined) botTokenMemo_ = PropertiesService.getScriptProperties().getProperty('BOT_TOKEN') || '';
+  if (botTokenMemo_ === undefined) botTokenMemo_ = (PropertiesService.getScriptProperties().getProperty('BOT_TOKEN') || '').trim();
   return botTokenMemo_;
 }
 
@@ -946,7 +990,28 @@ function telegramDenied_(initData) {
   if (verifySigned_(initData).expired) {
     return { status: 'expired', message: 'Сеанс Telegram устарел — закройте приложение и откройте его заново' };
   }
-  return { status: 'forbidden', message: 'Не удалось подтвердить пользователя Telegram' };
+  // Чаще всего подпись не сходится, когда приложение открыто из другого бота (например, тестовое — из рабочего).
+  // Называем бота этого скрипта, чтобы это было видно сразу
+  const bot = botUsername_();
+  return {
+    status: 'forbidden',
+    message: 'Не удалось подтвердить пользователя Telegram' + (bot ? '. Откройте приложение из бота @' + bot : ''),
+  };
+}
+
+// Имя бота по токену — для подсказок; запоминается в кэше на 6 часов. Нет связи с Telegram — пусто
+function botUsername_() {
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get('bot-username');
+  if (cached) return cached;
+  try {
+    const bot = JSON.parse(UrlFetchApp.fetch('https://api.telegram.org/bot' + botToken_() + '/getMe', { muteHttpExceptions: true }).getContentText());
+    if (!bot.ok) return '';
+    cache.put('bot-username', bot.result.username, 6 * 60 * 60);
+    return bot.result.username;
+  } catch (err) {
+    return '';
+  }
 }
 
 // Номер из подписанного ответа requestContact — только если это номер самого пользователя
@@ -958,11 +1023,149 @@ function verifiedPhone_(contactResponse, user) {
   return normalizePhone_(contact.phone_number) || null;
 }
 
-// ---------- Уведомления в Telegram ----------
+// ---------- Настройка окружения (функции для ручного запуска) ----------
+//
+// Эти функции приложение не вызывает — их запускают вручную в редакторе Apps Script: выбрать функцию в списке
+// над кодом → «Выполнить». При первом запуске Google попросит разрешить доступ. Вывод — в «Журнале выполнения»
+// внизу редактора.
+//
+// Новое окружение (например, тестовое: копия таблицы + свой бот) настраивается так:
+//   1. «Настройки проекта» (⚙️) → «Свойства скрипта»: BOT_TOKEN и MINI_APP_URL (см. шапку файла);
+//   2. installTriggers   — триггер onSheetEdit (или вручную в разделе «Триггеры»);
+//   3. setupMenuButton   — кнопка меню бота ведёт в приложение этого окружения;
+//   4. removeWebhook     — если checkSetup показывает вебхук (сообщения боту уходят старому коду);
+//   5. «Развернуть» → новое развёртывание (веб-приложение, «Выполнять как: я», доступ «Все») — его адрес
+//      вписать в VITE_GOOGLE_SCRIPT_URL файла .env этого окружения;
+//   6. checkSetup        — проверить, что всё сходится.
+// Адрес стартовой кнопки бота (Main Mini App) через Bot API не меняется — только в @BotFather:
+// Bot Settings → Configure Mini App → Edit Mini App URL.
 
 /**
- * Один раз запустите эту функцию в редакторе Apps Script (выбрать installTriggers → «Выполнить»)
- * и разрешите доступ: она создаёт триггер onSheetEdit на правки таблицы. Повторный запуск не плодит дубли.
+ * checkSetup — проверка настроек окружения. Ничего не меняет.
+ *
+ * Когда запускать: после настройки окружения и когда приложение пишет «Не удалось подтвердить пользователя
+ * Telegram», открывает не то окружение или бот ведёт себя странно.
+ *
+ * Что выводит (в «Журнал выполнения» и строкой «Проверка настроек» в «_Журнал»):
+ *  - BOT_TOKEN — длина и лишние пробелы (сам токен не выводится) и бот, которому он принадлежит;
+ *  - вебхук — должен быть «не задан»: сообщения боту этот скрипт не обрабатывает (иначе см. removeWebhook);
+ *  - кнопка меню — куда ведёт (должна вести на MINI_APP_URL; иначе см. setupMenuButton);
+ *  - MINI_APP_URL, адрес веб-приложения этого скрипта (в редакторе часто видна служебная ссылка …/dev),
+ *    название таблицы и есть ли триггер onSheetEdit.
+ */
+function checkSetup() {
+  const props = PropertiesService.getScriptProperties();
+  const rawToken = props.getProperty('BOT_TOKEN') || '';
+  const lines = [];
+  if (!rawToken) {
+    lines.push('BOT_TOKEN: не задан');
+  } else {
+    lines.push('BOT_TOKEN: ' + rawToken.length + ' символов' + (rawToken !== rawToken.trim() ? ' — есть пробелы или переносы по краям (скрипт их отбрасывает)' : ''));
+    const response = UrlFetchApp.fetch('https://api.telegram.org/bot' + rawToken.trim() + '/getMe', { muteHttpExceptions: true });
+    const bot = JSON.parse(response.getContentText());
+    lines.push(bot.ok ? 'Бот: @' + bot.result.username + ' (' + bot.result.first_name + ')' : 'Бот: токен не принят Telegram — ' + bot.description);
+    if (bot.ok) {
+      // Кто получает сообщения боту: наш скрипт сообщения не обрабатывает, поэтому вебхук должен быть пустым.
+      // Если он задан — ответы в чате (клавиатуры, команды) даёт тот код, а не этот скрипт
+      const callBot = function (method) {
+        return JSON.parse(UrlFetchApp.fetch('https://api.telegram.org/bot' + rawToken.trim() + '/' + method, { muteHttpExceptions: true }).getContentText());
+      };
+      const webhook = callBot('getWebhookInfo');
+      if (webhook.ok) {
+        lines.push('Вебхук: ' + (webhook.result.url || 'не задан') +
+          (webhook.result.pending_update_count ? ' (ждут обработки: ' + webhook.result.pending_update_count + ')' : '') +
+          (webhook.result.last_error_message ? ' (последняя ошибка: ' + webhook.result.last_error_message + ')' : ''));
+      }
+      const menu = callBot('getChatMenuButton');
+      if (menu.ok) {
+        lines.push('Кнопка меню: ' + (menu.result.type === 'web_app' ? '«' + menu.result.text + '» → ' + menu.result.web_app.url : menu.result.type));
+      }
+    }
+  }
+  lines.push('MINI_APP_URL: ' + (props.getProperty('MINI_APP_URL') || 'не задан'));
+  lines.push('Адрес веб-приложения этого скрипта: ' + (ScriptApp.getService().getUrl() || 'не развёрнут'));
+  lines.push('Таблица: ' + spreadsheet_().getName());
+  const triggers = ScriptApp.getProjectTriggers().filter(function (t) { return t.getHandlerFunction() === 'onSheetEdit'; });
+  lines.push('Триггер onSheetEdit: ' + (triggers.length ? 'есть' : 'нет'));
+  // И в журнал выполнения, и строкой в «_Журнал» — там вывод видно, даже если журнал выполнения не открылся
+  console.log(lines.join('\n'));
+  log_(spreadsheet_(), 'Проверка настроек', { id: '' }, { text: lines.join('\n') });
+}
+
+/**
+ * setupMenuButton — кнопка меню бота «Приложение» (слева от поля ввода в чате) на адрес MINI_APP_URL.
+ *
+ * Что делает:
+ *  1. ставит общую кнопку меню для всех чатов бота;
+ *  2. сбрасывает кнопки, заданные для отдельных чатов (их мог поставить прежний код бота — они важнее общей),
+ *     у всех спортсменов с ChatId, чтобы у них тоже действовала общая.
+ *
+ * Когда запускать: при настройке окружения и после смены MINI_APP_URL. Повторный запуск безопасен.
+ * Нужно: свойства BOT_TOKEN и MINI_APP_URL.
+ * Что выводит: куда ведёт кнопка и сколько кнопок отдельных чатов сброшено.
+ * Не меняет: стартовую кнопку бота (Main Mini App) — её адрес задаётся только в @BotFather.
+ * У пользователей Telegram может показывать старую кнопку, пока чат с ботом не открыт заново.
+ */
+function setupMenuButton() {
+  const props = PropertiesService.getScriptProperties();
+  const appUrl = props.getProperty('MINI_APP_URL');
+  if (!appUrl) throw new Error('Не задано свойство скрипта MINI_APP_URL');
+  const response = UrlFetchApp.fetch('https://api.telegram.org/bot' + botToken_() + '/setChatMenuButton', {
+    method: 'post',
+    contentType: 'application/json',
+    muteHttpExceptions: true,
+    payload: JSON.stringify({ menu_button: { type: 'web_app', text: 'Приложение', web_app: { url: appUrl } } }),
+  });
+  const result = JSON.parse(response.getContentText());
+  console.log(result.ok ? 'Кнопка меню: «Приложение» → ' + appUrl : 'Не удалось: ' + result.description);
+  if (!result.ok) return;
+
+  // Кнопка, заданная для отдельного чата (её мог поставить прежний код бота), важнее общей — сбрасываем такие
+  // кнопки у всех спортсменов с ChatId, чтобы у них действовала общая. Запросы — пачкой, одним fetchAll
+  const chatIds = athletesTable_(spreadsheet_()).athletes
+    .map(function (a) { return a.chatId; })
+    .filter(function (id, i, all) { return id && all.indexOf(id) === i; });
+  const responses = UrlFetchApp.fetchAll(chatIds.map(function (chatId) {
+    return {
+      url: 'https://api.telegram.org/bot' + botToken_() + '/setChatMenuButton',
+      method: 'post',
+      contentType: 'application/json',
+      muteHttpExceptions: true,
+      payload: JSON.stringify({ chat_id: chatId, menu_button: { type: 'default' } }),
+    };
+  }));
+  const failed = responses.filter(function (r) { return !JSON.parse(r.getContentText()).ok; }).length;
+  console.log('Кнопки отдельных чатов сброшены: ' + (chatIds.length - failed) + ' из ' + chatIds.length +
+    (failed ? ' (не удалось — обычно чаты, где пользователь не писал боту)' : ''));
+  console.log('Если приложение всё ещё открывается не то — проверьте адрес в @BotFather → Bot Settings → Configure Mini App');
+}
+
+/**
+ * removeWebhook — снять вебхук бота.
+ *
+ * Зачем: сообщения боту этот скрипт не обрабатывает. Если у бота задан вебхук на старый адрес (старое
+ * развёртывание, другой сервер), в чате отвечает старый код — со старыми клавиатурами и командами, —
+ * или Telegram копит ошибки доставки.
+ *
+ * Когда запускать: если checkSetup показывает вебхук. Сначала убедитесь, что по тому адресу нет нужной логики
+ * (команд, рассылок), — после снятия она перестанет получать сообщения. Повторный запуск безопасен.
+ * Что выводит: «Вебхук снят» или ошибку Telegram. Сообщения, ждущие обработки, отбрасываются.
+ */
+function removeWebhook() {
+  const response = UrlFetchApp.fetch('https://api.telegram.org/bot' + botToken_() + '/deleteWebhook?drop_pending_updates=true', {
+    muteHttpExceptions: true,
+  });
+  const result = JSON.parse(response.getContentText());
+  console.log(result.ok ? 'Вебхук снят' : 'Не удалось: ' + result.description);
+}
+
+/**
+ * installTriggers — триггер onSheetEdit на ручные правки таблицы (ID новым строкам, сброс кэша, уведомления).
+ *
+ * Когда запускать: один раз при настройке окружения. Повторный запуск безопасен — прежний триггер onSheetEdit
+ * удаляется, дублей не будет; другие триггеры не трогаются.
+ * Если Google отвечает «Произошла неизвестная ошибка» — создайте триггер вручную: «Триггеры» (⏰) →
+ * «Добавить триггер» → функция onSheetEdit, источник «Из таблицы», тип «При изменении».
  */
 function installTriggers() {
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
@@ -971,8 +1174,11 @@ function installTriggers() {
   ScriptApp.newTrigger('onSheetEdit').forSpreadsheet(spreadsheet_()).onEdit().create();
 }
 
+// ---------- Ручные правки таблицы и уведомления в Telegram ----------
+
 /**
  * Срабатывает при ручной правке таблицы (на изменения, сделанные скриптом, не срабатывает):
+ *  - строке без ID на листе из AUTO_ID_SHEETS, где появились данные, выдаётся ID;
  *  - статус спортсмена сменили на «Подтвержден» — бот поздравляет его с доступом;
  *  - статус заявки сменили на один из NOTIFY_APPLICATION_STATUSES — бот сообщает автору заявки.
  * Обрабатываются и правки диапазоном (вставка, протягивание).
@@ -980,6 +1186,8 @@ function installTriggers() {
 function onSheetEdit(e) {
   try {
     const sheetName = e.range.getSheet().getName();
+    // ID — до сброса кэша, чтобы приложение сразу получило строку уже с ID
+    if (AUTO_ID_SHEETS.indexOf(sheetName) !== -1) assignMissingIds_(e.range);
     // Лист правили вручную — его кэш для приложения устарел
     if (APP_SHEETS.indexOf(sheetName) !== -1) invalidateSheets_([sheetName]);
     // Значение не изменилось (выбрали то же самое) — молчим. oldValue есть только у правки одной ячейки
@@ -991,6 +1199,33 @@ function onSheetEdit(e) {
   } catch (err) {
     console.error('onSheetEdit: ' + err);
   }
+}
+
+// Строкам правки (кроме заголовка), где есть данные, но пуст первый столбец, — новый ID.
+// Одно чтение и одна запись на всю правку, даже если вставили много строк
+function assignMissingIds_(range) {
+  const sheet = range.getSheet();
+  const firstRow = Math.max(range.getRow(), 2);
+  const numRows = range.getLastRow() - firstRow + 1;
+  const lastColumn = sheet.getLastColumn();
+  if (numRows < 1 || lastColumn < 1) return;
+
+  const block = sheet.getRange(firstRow, 1, numRows, lastColumn);
+  const values = block.getValues();
+  let changed = false;
+  const issued = {};
+  const ids = values.map(function (row) {
+    if (String(row[0]).trim() !== '') return [row[0]];
+    const hasData = row.slice(1).some(function (cell) { return String(cell).trim() !== ''; });
+    if (!hasData) return [row[0]];
+    // При вставке многих строк ID выдаются в одну миллисекунду — повтор внутри вставки исключаем
+    let id = generateShortId();
+    while (issued[id]) id = generateShortId();
+    issued[id] = true;
+    changed = true;
+    return [id];
+  });
+  if (changed) sheet.getRange(firstRow, 1, numRows, 1).setValues(ids);
 }
 
 function notifyConfirmedAthletes_(ss, range) {
@@ -1039,15 +1274,14 @@ function notify_(ss, athlete, text, logEvent) {
 function sendTelegram_(chatId, text) {
   const botToken = botToken_();
   if (!botToken) return 'не задано свойство скрипта BOT_TOKEN';
+  const message = { chat_id: chatId, text: text };
+  const appUrl = PropertiesService.getScriptProperties().getProperty('MINI_APP_URL');
+  if (appUrl) message.reply_markup = { inline_keyboard: [[{ text: 'Открыть приложение', web_app: { url: appUrl } }]] };
   const response = UrlFetchApp.fetch('https://api.telegram.org/bot' + botToken + '/sendMessage', {
     method: 'post',
     contentType: 'application/json',
     muteHttpExceptions: true,
-    payload: JSON.stringify({
-      chat_id: chatId,
-      text: text,
-      reply_markup: { inline_keyboard: [[{ text: 'Открыть приложение', web_app: { url: MINI_APP_URL } }]] },
-    }),
+    payload: JSON.stringify(message),
   });
   if (response.getResponseCode() === 200) return null;
   try {
@@ -1146,6 +1380,14 @@ function cleanName_(value) {
 // ID в том же формате, что и существующие: время в base36 + 4 случайных символа
 function newId_() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+// generateShortId — короткий ID строки (тот же формат, что у newId_). Имя без «_», чтобы функция была доступна
+// вне скрипта: её вызывает onSheetEdit для строк, внесённых вручную, и её можно вызвать из других скриптов таблицы
+// (например, при переносе строк). Формулой в ячейке (=generateShortId()) не использовать: при пересчёте таблицы
+// ID поменяется и связи с ним потеряются
+function generateShortId() {
+  return newId_();
 }
 
 function spreadsheet_() {

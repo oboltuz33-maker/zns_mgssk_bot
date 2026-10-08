@@ -1,5 +1,6 @@
 import { APPLICATION_STATUS } from '../data/model.js';
 import { Badge, DataStatus, PageHeader } from '../components.jsx';
+import { ENV_LABEL } from '../config.js';
 
 // Что означает каждый статус заявки — для перевозчика
 const STATUS_HELP = [
@@ -49,7 +50,7 @@ export function HelpPage({ model, me, sheets, user, telegramStatus }) {
         <div className="section-label">Если что-то не так</div>
         <p className="item-row">
           Нажмите «🔄 Обновить» ниже — данные подгрузятся из таблицы заново (сами они
-          обновляются при открытии приложения, если с прошлой загрузки прошло больше 10 минут). Если не помогло, обратитесь к
+          обновляются при каждом открытии приложения). Если не помогло, обратитесь к
           администратору и сообщите версию приложения и ваш Telegram ID (они ниже).
         </p>
         <div className="help-refresh">
@@ -59,7 +60,10 @@ export function HelpPage({ model, me, sheets, user, telegramStatus }) {
 
       <div className="card item-card">
         <div className="section-label">О приложении</div>
-        <div className="item-row">Версия от {__BUILD_TIME__}</div>
+        <div className="item-row">
+          Версия от {__BUILD_TIME__}
+          {ENV_LABEL && <> · <Badge tone="warning">{ENV_LABEL}</Badge></>}
+        </div>
         {me && <div className="item-row">Спортсмен: {me.fullName}</div>}
         {user && (
           <div className="item-row">

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useSheets } from './data/useSheets.js';
 import { buildModel, findMyAthlete } from './data/model.js';
 import { requestWriteAccess } from './data/auth.js';
+import { ENV_LABEL, storageKey } from './config.js';
 import { EmptyState } from './components.jsx';
 import { HomePage } from './pages/HomePage.jsx';
 import { CompetitionsPage } from './pages/CompetitionsPage.jsx';
@@ -12,6 +13,9 @@ import { AuthScreen } from './pages/AuthScreen.jsx';
 import { ApplicationWizard } from './pages/ApplicationWizard.jsx';
 import { HelpPage } from './pages/HelpPage.jsx';
 import './App.css';
+
+// Метка тестового окружения поверх всех экранов — чтобы не перепутать с рабочим
+const EnvLabel = () => (ENV_LABEL ? <div className="env-label">{ENV_LABEL}</div> : null);
 
 // Разделы приложения. menu — показывать в нижнем меню (в порядке списка),
 // primary — главная кнопка меню: выделена и открывается при запуске.
@@ -104,7 +108,7 @@ function App() {
   const hasData = Boolean(sheets.data);
   useEffect(() => {
     if (!hasData) return;
-    const KEY = 'zns-write-access-asked';
+    const KEY = storageKey('zns-write-access-asked');
     try {
       if (localStorage.getItem(KEY)) return;
       localStorage.setItem(KEY, '1');
@@ -167,6 +171,7 @@ function App() {
 
     return (
       <main className="page">
+        <EnvLabel />
         {screen}
         {sheets.loading && sheets.accessDenied && <p className="sheet-meta auth-center">Проверяем доступ…</p>}
       </main>
@@ -175,6 +180,7 @@ function App() {
 
   return (
     <div className="app">
+      <EnvLabel />
       <main className="page">
         {page !== 'help' && !current.focused && (
           <button className="help-button" onClick={() => openPage('help')} aria-label="Помощь">
