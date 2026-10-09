@@ -43,7 +43,9 @@ export function HelpPage({ model, me, sheets, user, telegramStatus }) {
             <Badge tone={s.tone}>{s.status}</Badge> — {s.text}
           </div>
         ))}
-        <div className="item-hint">Когда статус меняется, бот присылает сообщение в Telegram.</div>
+        <div className="item-hint">
+          Когда статус меняется, бот присылает сообщение в Telegram. Перевозчик может отключить такие сообщения в профиле (👤).
+        </div>
       </div>
 
       <div className="card item-card">

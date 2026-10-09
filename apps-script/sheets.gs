@@ -17,6 +17,8 @@
  *      Закрепить единицу из справочника «Оружие» за собой — строка в листе «Спортсмен/Оружие».
  * POST { action: 'unassignWeapon', initData, weaponId }
  *      Открепить единицу от себя — строка удаляется из листа «Спортсмен/Оружие».
+ * POST { action: 'setNotifications', initData, notifications: { competitions?, applications? } }
+ *      Настройки уведомлений перевозчика (true/false) — в его строке «Спортсменов».
  * POST { action: 'deleteApplication', initData, number }
  *      Удаление: заявка переносится в «Архив заявок» со статусом «Удалена».
  *
@@ -93,6 +95,10 @@ const ATHLETE_COLUMN = {
   firstName: 'Имя',
   middleName: 'Отчество',
   carrier: 'Перевозчик',
+  // Настройки уведомлений перевозчика (меняет он сам в профиле приложения): «Нет» — не присылать;
+  // пусто или «Да» — присылать. Нет столбца в листе — уведомления у всех включены, а в профиле настройки не видно
+  notifyCompetitions: 'Сообщать о соревнованиях',
+  notifyApplications: 'Сообщать о заявках',
 };
 
 // Лист «Соревнования»
@@ -202,6 +208,7 @@ const WRITES_SHEETS = {
   deleteApplication: [SHEET.applications],
   assignWeapon: [SHEET.athleteWeapons],
   unassignWeapon: [SHEET.athleteWeapons],
+  setNotifications: [SHEET.athletes],
 };
 
 // Как связаться с администратором (например, '@username' или телефон) — подставляется
@@ -277,6 +284,7 @@ function runAction_(user, body) {
   if (body.action === 'deleteApplication') return deleteApplication_(user, body.number);
   if (body.action === 'assignWeapon') return assignWeapon_(user, body.weaponId);
   if (body.action === 'unassignWeapon') return unassignWeapon_(user, body.weaponId);
+  if (body.action === 'setNotifications') return setNotifications_(user, body.notifications || {});
   return { status: 'error', message: 'Неизвестное действие: ' + body.action };
 }
 
@@ -454,6 +462,9 @@ function athletesTable_(ss, fromCache) {
       status: cell(values[r], ATHLETE_COLUMN.status),
       phone: cell(values[r], ATHLETE_COLUMN.phone),
       isCarrier: cell(values[r], ATHLETE_COLUMN.carrier).toLowerCase() === 'да',
+      // Уведомления включены, пока в столбце не «Нет» (и когда столбца нет)
+      wantsCompetitions: cell(values[r], ATHLETE_COLUMN.notifyCompetitions).toLowerCase() !== 'нет',
+      wantsApplications: cell(values[r], ATHLETE_COLUMN.notifyApplications).toLowerCase() !== 'нет',
       lastName: lastName,
       firstName: firstName,
       middleName: middleName,
@@ -466,6 +477,7 @@ function athletesTable_(ss, fromCache) {
 
   return {
     athletes: athletes,
+    has: function (name) { return col(name) !== -1; },
     set: function (athlete, name, value) {
       sheet.getRange(athlete.row, col(name, true) + 1).setValue(value);
     },
@@ -738,6 +750,39 @@ function unassignWeapon_(user, weaponId) {
   return { status: 'success', message: title + ' откреплено', link: link };
 }
 
+// ---------- Настройки уведомлений ----------
+
+// Перевозчик включает или выключает уведомления в своём профиле: о новых соревнованиях (рассылка) и о смене статуса
+// своих заявок. input — { competitions?, applications? } (true/false); указанное пишется в его строку «Да»/«Нет».
+// В ответе — сохранённые значения: приложение сразу показывает их, не перечитывая таблицу
+function setNotifications_(user, input) {
+  const ss = spreadsheet_();
+  const table = athletesTable_(ss);
+  const athlete = findUser_(ss, table, user);
+  const denied = accessDenied_(athlete);
+  if (denied) throw userError_(denied.message);
+  if (!athlete.isCarrier) throw userError_('Настройки уведомлений есть только у перевозчиков');
+
+  const settings = [
+    { key: 'competitions', column: ATHLETE_COLUMN.notifyCompetitions },
+    { key: 'applications', column: ATHLETE_COLUMN.notifyApplications },
+  ].filter(function (s) { return typeof input[s.key] === 'boolean'; });
+  if (!settings.length) throw userError_('Нечего сохранять');
+
+  const saved = {};
+  settings.forEach(function (s) {
+    if (!table.has(s.column)) throw userError_('Эта настройка пока недоступна — обратитесь к администратору');
+    const value = input[s.key] ? 'Да' : 'Нет';
+    table.set(athlete, s.column, value);
+    saved[s.column] = value;
+  });
+  log_(ss, 'Настройки уведомлений', user, {
+    athleteId: athlete.id,
+    text: Object.keys(saved).map(function (column) { return column + ': ' + saved[column]; }).join('; '),
+  });
+  return { status: 'success', athleteId: athlete.id, fields: saved };
+}
+
 // ---------- Работа с листами ----------
 // Чтение листа — самая долгая часть вызова скрипта. Поэтому:
 //  - за один вызов каждый лист читается из таблицы не больше одного раза (sheetValuesMemo_);
@@ -911,9 +956,11 @@ function readSheets_(ss, names, athleteId) {
       return row.some(function (cell) { return cell !== ''; });
     });
 
-    // Телефоны и ChatId спортсменов приложению не нужны (участников выбирают по ФИО) — отдаём только свои
+    // Телефоны, ChatId и настройки уведомлений других спортсменов приложению не нужны (участников выбирают по ФИО) —
+    // отдаём только свои
     if (name === SHEET.athletes) {
-      const hidden = [headers.indexOf(ATHLETE_COLUMN.phone), headers.indexOf(ATHLETE_COLUMN.chatId)];
+      const hidden = [ATHLETE_COLUMN.phone, ATHLETE_COLUMN.chatId, ATHLETE_COLUMN.notifyCompetitions, ATHLETE_COLUMN.notifyApplications]
+        .map(function (column) { return headers.indexOf(column); });
       rows = rows.map(function (row) {
         if (String(row[0]).trim() === athleteId) return row;
         return row.map(function (cell, i) { return hidden.indexOf(i) === -1 ? cell : ''; });
@@ -1288,9 +1335,12 @@ function notifyNewCompetitions_(ss, range) {
     });
     if (!ready.length) return;
 
-    const carriers = athletesTable_(ss).athletes.filter(function (a) {
+    const allCarriers = athletesTable_(ss).athletes.filter(function (a) {
       return a.status === ATHLETE_STATUS.confirmed && a.isCarrier && a.chatId;
     });
+    // Отключившие рассылку в профиле — не получают
+    const carriers = allCarriers.filter(function (a) { return a.wantsCompetitions; });
+    const optedOut = allCarriers.length - carriers.length;
     ready.forEach(function (row) {
       const text = competitionMessage_(competitions, row);
       // Кнопка ведёт сразу в мастер заявки на этом соревновании
@@ -1309,6 +1359,7 @@ function notifyNewCompetitions_(ss, range) {
       const title = String(competitions.get(row, COMPETITION_COLUMN.title)).trim();
       log_(ss, 'Рассылка: новое соревнование', { id: '' }, {
         text: title + ' — отправлено ' + (carriers.length - failed.length) + ' из ' + carriers.length + ' перевозчикам' +
+          (optedOut ? ' (ещё ' + optedOut + ' отключили рассылку)' : '') +
           (failed.length ? '. Не доставлено: ' + failed.join('; ') : ''),
       });
     });
@@ -1361,7 +1412,7 @@ function notifyApplicationStatus_(ss, range) {
 
     const authorId = String(applications.get(row, APPLICATION_COLUMN.createdBy)).trim();
     const author = findAthlete_(athletes, function (a) { return a.id === authorId; });
-    if (!author || !author.chatId) return;
+    if (!author || !author.chatId || !author.wantsApplications) return;
 
     const number = row.values[0];
     const title = String(applications.get(row, APPLICATION_COLUMN.competitionTitle)).trim();

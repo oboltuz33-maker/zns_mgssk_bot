@@ -12,6 +12,7 @@ import { ApplicationsPage } from './pages/ApplicationsPage.jsx';
 import { AuthScreen } from './pages/AuthScreen.jsx';
 import { ApplicationWizard } from './pages/ApplicationWizard.jsx';
 import { HelpPage } from './pages/HelpPage.jsx';
+import { ProfilePage } from './pages/ProfilePage.jsx';
 import './App.css';
 
 // Метка тестового окружения поверх всех экранов — чтобы не перепутать с рабочим
@@ -25,7 +26,8 @@ const PAGES = [
   { id: 'competitions', icon: '🏆', label: 'Соревнования', component: CompetitionsPage, menu: true },
   { id: 'applications', icon: '📝', label: 'Заявки', component: ApplicationsPage, menu: true, primary: true },
   { id: 'weapons', icon: '🎯', label: 'Оружие', component: WeaponsPage, menu: true },
-  // «Помощь» — не в меню, а значком «?» в правом верхнем углу страниц
+  // «Профиль» — не в меню, а значком 👤 в правом верхнем углу страниц; «Помощь» открывается из профиля
+  { id: 'profile', icon: '👤', label: 'Профиль', component: ProfilePage },
   { id: 'help', icon: '❓', label: 'Помощь', component: HelpPage },
   { id: 'home', icon: '🏠', label: 'Главная', component: HomePage },
   { id: 'athletes', icon: '👤', label: 'Спортсмены', component: AthletesPage },
@@ -204,9 +206,9 @@ function App() {
     <div className="app">
       <EnvLabel />
       <main className="page">
-        {page !== 'help' && !current.focused && (
-          <button className="help-button" onClick={() => openPage('help')} aria-label="Помощь">
-            ?
+        {page !== 'profile' && !current.focused && (
+          <button className="help-button" onClick={() => openPage('profile')} aria-label="Профиль">
+            👤
           </button>
         )}
         {page !== 'home' && sheets.loading && !sheets.data && <p className="sheet-meta">Загрузка таблицы…</p>}

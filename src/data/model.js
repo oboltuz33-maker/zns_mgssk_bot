@@ -65,6 +65,12 @@ export const shortName = (lastName, firstName, middleName) => {
 
 const rowsOf = (data, sheetName) => data?.sheets?.[sheetName]?.rows ?? [];
 
+// Столбцы листа «Спортсмены» с настройками уведомлений перевозчика (ключ — как в запросе setNotifications)
+export const NOTIFY_COLUMN = {
+  competitions: 'Сообщать о соревнованиях',
+  applications: 'Сообщать о заявках',
+};
+
 // Предстоящее соревнование — дата начала сегодня или позже (по Москве). То же правило, что в Apps Script:
 // только на такие можно подать заявку. Без даты (или с неверной датой) — тоже предстоящее, чтобы не потерялось.
 // Здесь — на случай данных, сохранённых на устройстве раньше
@@ -110,6 +116,9 @@ export function buildModel(data) {
       chatId: str(r['ChatId']),
       status: str(r['Статус']),
       isCarrier: str(r['Перевозчик']).toLowerCase() === 'да',
+      // Настройки уведомлений (видны только свои): «Нет» — выключено, пусто или «Да» — включено
+      notifyCompetitions: str(r[NOTIFY_COLUMN.competitions]).toLowerCase() !== 'нет',
+      notifyApplications: str(r[NOTIFY_COLUMN.applications]).toLowerCase() !== 'нет',
       weapons: [],
     };
   });
@@ -170,12 +179,17 @@ export function buildModel(data) {
   const transportSheet = data?.sheets?.[SHEET.transportTypes];
   const transportTypes = transportSheet ? transportSheet.rows.map((r) => str(r[transportSheet.headers[0]])) : [];
 
+  // Какие настройки уведомлений есть в таблице: нет столбца — в профиле нет и переключателя
+  const athleteHeaders = data?.sheets?.[SHEET.athletes]?.headers ?? [];
+  const notificationSettings = Object.keys(NOTIFY_COLUMN).filter((key) => athleteHeaders.includes(NOTIFY_COLUMN[key]));
+
   return {
     competitions,
     athletes,
     weapons,
     applications,
     transportTypes,
+    notificationSettings,
     skipped,
     athleteId: data?.athleteId ?? null,
   };

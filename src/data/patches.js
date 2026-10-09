@@ -34,3 +34,7 @@ export const withWeaponLink = (data, link) =>
   );
 
 export const withoutWeaponLink = (data, link) => withRows(data, SHEET.athleteWeapons, (rows) => rows.filter((r) => !isLink(r, link)));
+
+// Поля строки спортсмена изменены (например, настройки уведомлений): fields — { заголовок: значение } из ответа Apps Script
+export const withAthleteFields = (data, athleteId, fields) =>
+  withRows(data, SHEET.athletes, (rows) => rows.map((r) => (String(r['ID']) === String(athleteId) ? { ...r, ...fields } : r)));
