@@ -21,8 +21,11 @@ export async function checkForUpdate() {
     if (sessionStorage.getItem(RELOAD_FLAG) === latest) return;
     sessionStorage.setItem(RELOAD_FLAG, latest);
 
-    // Новый query-параметр обходит кэш; hash обязательно сохраняем — в нём данные Telegram (tgWebAppData)
-    location.replace(`${location.pathname}?v=${Date.now()}${location.hash}`);
+    // Новый параметр v обходит кэш. Остальные параметры (?page=…&competition=… из ссылки бота) и hash сохраняем —
+    // в hash данные Telegram (tgWebAppData)
+    const search = new URLSearchParams(location.search);
+    search.set('v', Date.now());
+    location.replace(`${location.pathname}?${search}${location.hash}`);
   } catch {
     // Нет сети — работаем с тем, что загрузилось
   }

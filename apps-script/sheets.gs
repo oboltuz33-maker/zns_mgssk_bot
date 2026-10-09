@@ -31,7 +31,9 @@
  *    с неуказанной или неверной датой начала тоже отдаются, чтобы не потерялись).
  *
  * Уведомления: при ручной смене статуса спортсмена на «Подтвержден» и статуса заявки на «В работе» /
- * «Выполнена» бот пишет спортсмену (триггер onSheetEdit; создаётся один раз функцией installTriggers).
+ * «Выполнена» бот пишет спортсмену, а о новом соревновании (заполнены название, даты и адрес) — всем
+ * подтверждённым перевозчикам, один раз; отметка — в столбце «Рассылка» (триггер onSheetEdit; создаётся один раз
+ * функцией installTriggers).
  * Настройка окружения и проверка — функции раздела «Настройка окружения» (checkSetup, setupMenuButton, …).
  *
  * Ответы: status = success | unregistered | pending | forbidden | expired | not_found | conflict | error
@@ -101,6 +103,9 @@ const COMPETITION_COLUMN = {
   start: 'Дата начала',
   end: 'Дата завершения',
   address: 'Адрес',
+  // Когда перевозчикам разослано сообщение о новом соревновании (ставит скрипт). Пусто — ещё не рассылалось;
+  // очистить ячейку — разослать заново; вписать что угодно (например, «нет») — не рассылать
+  notified: 'Рассылка',
 };
 
 // Лист «Оружие»
@@ -211,6 +216,10 @@ const NOTIFY_APPLICATION_STATUSES = [APPLICATION_STATUS.inProgress, APPLICATION_
 // (generateShortId). Не входят: «Заявки» (№ ставит скрипт), «Спортсмен/Оружие» (первый столбец — ID спортсмена),
 // «Виды транспорта» (первый столбец — название)
 const AUTO_ID_SHEETS = [SHEET.athletes, SHEET.competitions, SHEET.weapons];
+
+// Рассылка перевозчикам о новом соревновании: уходит, когда у строки заполнены все эти столбцы,
+// а столбец «Рассылка» пуст. Нет столбца «Рассылка» в листе — рассылки нет
+const NEW_COMPETITION_REQUIRED = [COMPETITION_COLUMN.title, COMPETITION_COLUMN.start, COMPETITION_COLUMN.end, COMPETITION_COLUMN.address];
 
 // ---------- Точки входа ----------
 
@@ -1034,6 +1043,7 @@ function verifiedPhone_(contactResponse, user) {
 //   2. installTriggers   — триггер onSheetEdit (или вручную в разделе «Триггеры»);
 //   3. setupMenuButton   — кнопка меню бота ведёт в приложение этого окружения;
 //   4. removeWebhook     — если checkSetup показывает вебхук (сообщения боту уходят старому коду);
+//      markExistingCompetitions — один раз после добавления столбца «Рассылка» в «Соревнования»;
 //   5. «Развернуть» → новое развёртывание (веб-приложение, «Выполнять как: я», доступ «Все») — его адрес
 //      вписать в VITE_GOOGLE_SCRIPT_URL файла .env этого окружения;
 //   6. checkSetup        — проверить, что всё сходится.
@@ -1160,6 +1170,32 @@ function removeWebhook() {
 }
 
 /**
+ * markExistingCompetitions — отметить все уже внесённые соревнования как разосланные.
+ *
+ * Зачем: рассылка о новом соревновании уходит, когда у строки пуст столбец «Рассылка». Сразу после добавления
+ * этого столбца он пуст у всех строк — и первая же правка старого соревнования разослала бы его как новое.
+ * Функция пишет «до рассылки» во все пустые ячейки «Рассылки», и рассылаются только соревнования, добавленные после.
+ *
+ * Когда запускать: один раз — сразу после того, как в лист «Соревнования» добавлен столбец «Рассылка».
+ * Повторный запуск безопасен: заполненные ячейки не трогаются (но и новые неразосланные строки будут отмечены).
+ * Что выводит: сколько строк отмечено.
+ */
+function markExistingCompetitions() {
+  const competitions = readTable_(spreadsheet_(), SHEET.competitions);
+  if (competitions.headers.indexOf(COMPETITION_COLUMN.notified) === -1) {
+    throw new Error('Сначала добавьте в лист «' + SHEET.competitions + '» столбец «' + COMPETITION_COLUMN.notified + '»');
+  }
+  const col = competitions.col(COMPETITION_COLUMN.notified);
+  let marked = 0;
+  competitions.rows.forEach(function (row) {
+    if (String(row.values[col]).trim() !== '') return;
+    competitions.sheet.getRange(row.row, col + 1).setValue('до рассылки');
+    marked++;
+  });
+  console.log('Отмечено соревнований: ' + marked);
+}
+
+/**
  * installTriggers — триггер onSheetEdit на ручные правки таблицы (ID новым строкам, сброс кэша, уведомления).
  *
  * Когда запускать: один раз при настройке окружения. Повторный запуск безопасен — прежний триггер onSheetEdit
@@ -1179,6 +1215,7 @@ function installTriggers() {
 /**
  * Срабатывает при ручной правке таблицы (на изменения, сделанные скриптом, не срабатывает):
  *  - строке без ID на листе из AUTO_ID_SHEETS, где появились данные, выдаётся ID;
+ *  - у нового соревнования заполнены все NEW_COMPETITION_REQUIRED — перевозчикам уходит рассылка;
  *  - статус спортсмена сменили на «Подтвержден» — бот поздравляет его с доступом;
  *  - статус заявки сменили на один из NOTIFY_APPLICATION_STATUSES — бот сообщает автору заявки.
  * Обрабатываются и правки диапазоном (вставка, протягивание).
@@ -1188,6 +1225,7 @@ function onSheetEdit(e) {
     const sheetName = e.range.getSheet().getName();
     // ID — до сброса кэша, чтобы приложение сразу получило строку уже с ID
     if (AUTO_ID_SHEETS.indexOf(sheetName) !== -1) assignMissingIds_(e.range);
+    if (sheetName === SHEET.competitions) notifyNewCompetitions_(spreadsheet_(), e.range);
     // Лист правили вручную — его кэш для приложения устарел
     if (APP_SHEETS.indexOf(sheetName) !== -1) invalidateSheets_([sheetName]);
     // Значение не изменилось (выбрали то же самое) — молчим. oldValue есть только у правки одной ячейки
@@ -1226,6 +1264,77 @@ function assignMissingIds_(range) {
     return [id];
   });
   if (changed) sheet.getRange(firstRow, 1, numRows, 1).setValues(ids);
+}
+
+// Рассылка подтверждённым перевозчикам о новых соревнованиях в строках правки: заполнены все
+// NEW_COMPETITION_REQUIRED, столбец «Рассылка» пуст, соревнование ещё не началось. После рассылки в «Рассылку»
+// пишется её время — поэтому каждое соревнование рассылается один раз, и последующие правки строки рассылку не повторяют.
+// Под блокировкой: два быстрых срабатывания триггера подряд иначе оба увидели бы пустую отметку
+function notifyNewCompetitions_(ss, range) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) return; // не дождались — строку подхватит следующая правка
+  try {
+    const competitions = readTable_(ss, SHEET.competitions);
+    if (competitions.headers.indexOf(COMPETITION_COLUMN.notified) === -1) return;
+    const notifiedCol = competitions.col(COMPETITION_COLUMN.notified) + 1;
+
+    const ready = competitions.rows.filter(function (row) {
+      if (!rowInRange_(range, row.row)) return false;
+      if (String(competitions.get(row, COMPETITION_COLUMN.notified)).trim() !== '') return false;
+      const filled = NEW_COMPETITION_REQUIRED.every(function (column) {
+        return String(competitions.get(row, column)).trim() !== '';
+      });
+      return filled && isUpcoming_(competitions.get(row, COMPETITION_COLUMN.start));
+    });
+    if (!ready.length) return;
+
+    const carriers = athletesTable_(ss).athletes.filter(function (a) {
+      return a.status === ATHLETE_STATUS.confirmed && a.isCarrier && a.chatId;
+    });
+    ready.forEach(function (row) {
+      const text = competitionMessage_(competitions, row);
+      // Кнопка ведёт сразу в мастер заявки на этом соревновании
+      const button = { text: 'Подать заявку', params: { page: 'application-form', competition: String(row.values[0]).trim() } };
+      const responses = UrlFetchApp.fetchAll(carriers.map(function (a) {
+        const args = telegramRequestArgs_(a.chatId, text, button);
+        args[1].url = args[0];
+        return args[1];
+      }));
+      const failed = [];
+      responses.forEach(function (response, i) {
+        const error = telegramError_(response);
+        if (error) failed.push(carriers[i].shortName + ' — ' + error);
+      });
+      competitions.sheet.getRange(row.row, notifiedCol).setValue(new Date());
+      const title = String(competitions.get(row, COMPETITION_COLUMN.title)).trim();
+      log_(ss, 'Рассылка: новое соревнование', { id: '' }, {
+        text: title + ' — отправлено ' + (carriers.length - failed.length) + ' из ' + carriers.length + ' перевозчикам' +
+          (failed.length ? '. Не доставлено: ' + failed.join('; ') : ''),
+      });
+    });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Текст рассылки о соревновании: название, вид, даты, адрес
+function competitionMessage_(competitions, row) {
+  const value = function (column) { return String(competitions.get(row, column)).trim(); };
+  const date = function (column) {
+    const raw = competitions.get(row, column);
+    const parsed = sheetDate_(raw);
+    return parsed ? Utilities.formatDate(parsed, Session.getScriptTimeZone(), 'dd.MM.yyyy') : String(raw).trim();
+  };
+  const start = date(COMPETITION_COLUMN.start);
+  const end = date(COMPETITION_COLUMN.end);
+  return [
+    'Новое соревнование: ' + value(COMPETITION_COLUMN.title),
+    value(COMPETITION_COLUMN.kind),
+    'Даты: ' + (end && end !== start ? start + ' – ' + end : start),
+    'Адрес: ' + value(COMPETITION_COLUMN.address),
+    '',
+    'Чтобы подать заявку на перевозку, нажмите «Подать заявку».',
+  ].filter(function (line, i) { return i !== 1 || line; }).join('\n');
 }
 
 function notifyConfirmedAthletes_(ss, range) {
@@ -1272,17 +1381,32 @@ function notify_(ss, athlete, text, logEvent) {
 
 // Отправка через Bot API. Возвращает null или текст ошибки (например, пользователь не разрешил боту писать)
 function sendTelegram_(chatId, text) {
-  const botToken = botToken_();
-  if (!botToken) return 'не задано свойство скрипта BOT_TOKEN';
+  if (!botToken_()) return 'не задано свойство скрипта BOT_TOKEN';
+  return telegramError_(UrlFetchApp.fetch.apply(UrlFetchApp, telegramRequestArgs_(chatId, text)));
+}
+
+// Запрос sendMessage с кнопкой, открывающей приложение (если задан MINI_APP_URL): [адрес, параметры] для UrlFetchApp.
+// button — { text, params }: надпись и параметры адреса приложения (например, { page, competition });
+// по умолчанию «Открыть приложение» на стартовой странице
+function telegramRequestArgs_(chatId, text, button) {
   const message = { chat_id: chatId, text: text };
   const appUrl = PropertiesService.getScriptProperties().getProperty('MINI_APP_URL');
-  if (appUrl) message.reply_markup = { inline_keyboard: [[{ text: 'Открыть приложение', web_app: { url: appUrl } }]] };
-  const response = UrlFetchApp.fetch('https://api.telegram.org/bot' + botToken + '/sendMessage', {
+  if (appUrl) {
+    const params = (button && button.params) || {};
+    const query = Object.keys(params).map(function (key) { return key + '=' + encodeURIComponent(params[key]); }).join('&');
+    const url = query ? appUrl + (appUrl.indexOf('?') === -1 ? '?' : '&') + query : appUrl;
+    message.reply_markup = { inline_keyboard: [[{ text: (button && button.text) || 'Открыть приложение', web_app: { url: url } }]] };
+  }
+  return ['https://api.telegram.org/bot' + botToken_() + '/sendMessage', {
     method: 'post',
     contentType: 'application/json',
     muteHttpExceptions: true,
     payload: JSON.stringify(message),
-  });
+  }];
+}
+
+// null — сообщение доставлено; иначе текст ошибки Telegram
+function telegramError_(response) {
   if (response.getResponseCode() === 200) return null;
   try {
     return JSON.parse(response.getContentText()).description || 'код ' + response.getResponseCode();

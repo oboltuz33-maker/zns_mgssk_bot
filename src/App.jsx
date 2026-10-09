@@ -47,12 +47,22 @@ const initialPage = () => {
   return PAGES.some((p) => p.id === fromUrl) ? fromUrl : START_PAGE;
 };
 
+// ?page=application-form&competition=<ID> — мастер заявки сразу на этом соревновании
+// (кнопка «Подать заявку» в рассылке бота о новом соревновании)
+const initialParams = () => {
+  const competitionId = new URLSearchParams(location.search).get('competition');
+  return competitionId && initialPage() === 'application-form' ? { competitionId } : {};
+};
+
+// Когда открыто приложение: данные, загруженные раньше (сохранённые на устройстве), могут не знать о новом соревновании
+const APP_STARTED_AT = Date.now();
+
 function App() {
   const [user, setUser] = useState(null);
   const [debugMessage, setDebugMessage] = useState("Ожидание Telegram...");
   const [page, setPage] = useState(initialPage);
   // Параметры страницы, например { competitionId } или { number } для мастера заявки
-  const [pageParams, setPageParams] = useState({});
+  const [pageParams, setPageParams] = useState(initialParams);
   // Листы таблицы загружаются один раз на всё приложение и доступны всем страницам
   const sheets = useSheets();
   const model = useMemo(() => buildModel(sheets.data), [sheets.data]);
@@ -132,6 +142,18 @@ function App() {
     return () => backButton.offClick(goHome);
   }, [page]);
 
+  // Мастер открыт по ссылке на соревнование, которого нет в данных. Пока не пришли данные, загруженные после
+  // открытия приложения, ждём их (соревнование могли добавить только что). Нет и в свежих — уже началось или
+  // удалено: открываем мастер с выбором соревнования
+  const linkedCompetitionMissing = page === 'application-form' && Boolean(pageParams.competitionId) && !pageParams.number &&
+    !model.competitions.some((c) => c.id === pageParams.competitionId);
+  const waitingForLinkedCompetition = linkedCompetitionMissing && !sheets.error && !(sheets.savedAt >= APP_STARTED_AT);
+  useEffect(() => {
+    if (!linkedCompetitionMissing || waitingForLinkedCompetition) return;
+    setPageParams({});
+    showMessage('Соревнование из сообщения не найдено — возможно, оно уже началось. Выберите соревнование из списка.');
+  }, [linkedCompetitionMissing, waitingForLinkedCompetition]);
+
   const openPage = (next, params = {}) => {
     setPage(next);
     setPageParams(params);
@@ -190,22 +212,24 @@ function App() {
         {page !== 'home' && sheets.loading && !sheets.data && <p className="sheet-meta">Загрузка таблицы…</p>}
         {page !== 'home' && sheets.error && <p className="sheet-error">Не удалось загрузить таблицу: {sheets.error}</p>}
 
-        <Page
-          // key — мастер начинается заново при открытии с другими параметрами
-          key={page + JSON.stringify(pageParams)}
-          model={model}
-          sheets={sheets}
-          user={user}
-          me={me}
-          params={pageParams}
-          telegramStatus={debugMessage}
-          onOpenPage={openPage}
-          onRecheckTelegram={checkTelegramEnv}
-          onMessage={showMessage}
-          onCancel={() => openPage('applications')}
-        />
-
-
+        {waitingForLinkedCompetition ? (
+          <EmptyState icon="⏳" title="Загружаем соревнование…" />
+        ) : (
+          <Page
+            // key — мастер начинается заново при открытии с другими параметрами
+            key={page + JSON.stringify(pageParams)}
+            model={model}
+            sheets={sheets}
+            user={user}
+            me={me}
+            params={pageParams}
+            telegramStatus={debugMessage}
+            onOpenPage={openPage}
+            onRecheckTelegram={checkTelegramEnv}
+            onMessage={showMessage}
+            onCancel={() => openPage('applications')}
+          />
+        )}
       </main>
 
       {!current.focused && (

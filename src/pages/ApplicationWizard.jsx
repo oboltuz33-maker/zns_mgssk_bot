@@ -184,12 +184,15 @@ export function ApplicationWizard({ model, me, params, sheets, onOpenPage, onCan
   }
 
   const StepView = { competition: CompetitionStep, participants: ParticipantsStep, review: ReviewStep }[stepInfo.id];
+  // На шаге участников видно, на какое соревнование заявка, — особенно когда мастер открыт сразу на нём
+  // (из карточки соревнования или по кнопке «Подать заявку» в рассылке бота)
+  const competitionTitle = stepInfo.id === 'participants' && model.competitions.find((c) => c.id === draft.competitionId)?.title;
 
   return (
     <>
       <PageHeader
         title={draft.number ? `Заявка № ${draft.number}` : 'Новая заявка'}
-        subtitle={`Шаг ${step + 1} из ${WIZARD_STEPS.length}: ${stepInfo.title}`}
+        subtitle={`Шаг ${step + 1} из ${WIZARD_STEPS.length}: ${stepInfo.title}${competitionTitle ? ` · ${competitionTitle}` : ''}`}
       />
       <div className="wizard-progress">
         {WIZARD_STEPS.map((s, i) => (

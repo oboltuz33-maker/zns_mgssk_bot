@@ -39,7 +39,10 @@
           if (el && el !== window && (el.tagName === 'SCRIPT' || el.tagName === 'LINK')) {
             if (!storage(function (s) { return s.getItem(FLAG); })) {
               storage(function (s) { s.setItem(FLAG, '1'); });
-              location.replace(location.pathname + '?v=' + Date.now() + location.hash);
+              // Параметры адреса (?page=…&competition=… из ссылки бота) сохраняем, прежний v заменяем
+              var query = location.search.replace(/^\?/, '').split('&').filter(function (p) { return p && p.indexOf('v=') !== 0; });
+              query.push('v=' + Date.now());
+              location.replace(location.pathname + '?' + query.join('&') + location.hash);
             } else {
               showError('не удалось загрузить ' + (el.src || el.href));
             }
