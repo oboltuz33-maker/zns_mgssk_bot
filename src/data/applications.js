@@ -33,9 +33,11 @@ export function newDraft(model, me, competitionId = '') {
 }
 
 // Запись из столбца «Оружие» («Фамилия И.О.» + { title, number }) → { athlete, weapon } или null.
-// Оружие — по номеру, спортсмен — по «Фамилия И.О.» (сначала среди владельцев этого оружия)
-function matchWeapon(model, name, { number }) {
-  const weapon = number && model.weapons.find((w) => w.number.toLowerCase() === number.toLowerCase());
+// Оружие — по номеру (если номер совпал у нескольких единиц — та, у которой совпало и название),
+// спортсмен — по «Фамилия И.О.» (сначала среди владельцев этого оружия)
+function matchWeapon(model, name, { title, number }) {
+  const sameNumber = number ? model.weapons.filter((w) => w.number.toLowerCase() === number.toLowerCase()) : [];
+  const weapon = sameNumber.find((w) => w.title.toLowerCase() === title.toLowerCase()) || sameNumber[0];
   const athlete =
     (weapon && weapon.owners.find((a) => a.shortName === name)) || model.athletes.find((a) => a.shortName === name);
   return weapon && athlete ? { athlete, weapon } : null;
@@ -185,15 +187,21 @@ export const weaponLines = (draft, model) =>
     return `${athlete?.shortName} : ${weapons.join(' ; ')}`;
   });
 
-// Отправка в Apps Script. Ответ: { status: 'success', number } или { status: 'error', message }
-export const saveApplication = (draft) =>
-  postAction('saveApplication', {
-    application: {
-      number: draft.number || undefined,
-      competitionId: draft.competitionId,
-      items: draft.items,
-      transport: draft.transport,
+// Отправка в Apps Script. Ответ: { status: 'success', number } или { status: 'error', message }.
+// requestId — один на отправку одного и того же черновика: если ответ потерялся и пользователь нажал ещё раз,
+// скрипт вернёт прежний ответ, а не создаст вторую заявку
+export const saveApplication = (draft, requestId) =>
+  postAction(
+    'saveApplication',
+    {
+      application: {
+        number: draft.number || undefined,
+        competitionId: draft.competitionId,
+        items: draft.items,
+        transport: draft.transport,
+      },
     },
-  });
+    requestId,
+  );
 
 export const deleteApplication = (number) => postAction('deleteApplication', { number });

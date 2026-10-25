@@ -7,10 +7,11 @@ import { fetchWithRetry, newRequestId } from './network.js';
 // и requestId: при обрыве связи запрос повторяется, и скрипт по requestId не выполнит его второй раз
 // (например, не создаст вторую такую же заявку, если первый запрос дошёл, а ответ потерялся).
 // Ответ: { status, message, ... }, где status — success | pending | not_found | conflict | forbidden | expired | error.
-export async function postAction(action, payload) {
+// requestId можно передать свой — чтобы и повторное нажатие пользователя после ошибки связи сервер узнал как повтор
+export async function postAction(action, payload, requestId = newRequestId()) {
   const response = await fetchWithRetry(GOOGLE_SCRIPT_URL, {
     method: 'POST',
-    body: JSON.stringify({ action, initData: telegramInitData(), requestId: newRequestId(), ...payload }),
+    body: JSON.stringify({ action, initData: telegramInitData(), requestId, ...payload }),
   });
   try {
     return await response.json();

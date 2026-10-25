@@ -29,6 +29,7 @@
  *  - initData и contact проверяются по подписи токеном бота — подделать пользователя или номер нельзя;
  *  - пользователь ищется в листе «Спортсмены» по ChatId; данные отдаются только при статусе «Подтвержден»;
  *  - листы из USER_SCOPED_SHEETS отдаются только со строками этого спортсмена;
+ *  - в «Спортсменах» у чужих строк — только столбцы ATHLETE_PUBLIC_COLUMNS;
  *  - из «Соревнований» отдаются только предстоящие (дата начала — сегодня или позже; соревнования
  *    с неуказанной или неверной датой начала тоже отдаются, чтобы не потерялись).
  *
@@ -100,6 +101,16 @@ const ATHLETE_COLUMN = {
   notifyCompetitions: 'Сообщать о соревнованиях',
   notifyApplications: 'Сообщать о заявках',
 };
+
+// Столбцы «Спортсменов», которые видны другим спортсменам (кроме ID в первом столбце). Остальные — телефон, ChatId,
+// настройки уведомлений и любые столбцы, добавленные позже, — спортсмен видит только в своей строке
+const ATHLETE_PUBLIC_COLUMNS = [
+  ATHLETE_COLUMN.lastName,
+  ATHLETE_COLUMN.firstName,
+  ATHLETE_COLUMN.middleName,
+  ATHLETE_COLUMN.status,
+  ATHLETE_COLUMN.carrier,
+];
 
 // Лист «Соревнования»
 const COMPETITION_COLUMN = {
@@ -362,6 +373,8 @@ function linkPhone_(user, contactResponse) {
   if (AUTO_CONFIRM_STATUSES.indexOf(athlete.status) !== -1) {
     table.set(athlete, ATHLETE_COLUMN.status, ATHLETE_STATUS.confirmed);
     athlete.status = ATHLETE_STATUS.confirmed;
+    // Человек и так видит, что вошёл, — сообщение «доступ подтверждён» при будущих правках его строки не нужно
+    PropertiesService.getScriptProperties().setProperty(notifiedKey_(SHEET.athletes, athlete.id), ATHLETE_STATUS.confirmed);
   }
   log_(ss, 'Привязка по телефону', user, { phone: phone, athleteId: athlete.id, text: 'Статус: ' + athlete.status });
   return accessResult_(athlete);
@@ -479,14 +492,14 @@ function athletesTable_(ss, fromCache) {
     athletes: athletes,
     has: function (name) { return col(name) !== -1; },
     set: function (athlete, name, value) {
-      sheet.getRange(athlete.row, col(name, true) + 1).setValue(value);
+      sheet.getRange(athlete.row, col(name, true) + 1).setValue(safeCell_(value));
     },
     append: function (id, valuesByColumn) {
       const row = headers.map(function (h, i) {
         if (i === 0) return id;
         return valuesByColumn.hasOwnProperty(h) ? valuesByColumn[h] : '';
       });
-      sheet.appendRow(row);
+      sheet.appendRow(safeRow_(row));
     },
   };
 }
@@ -550,10 +563,18 @@ function saveApplication_(user, input) {
   };
 
   if (input.number) {
-    const row = ownNewApplication_(table, input.number, author);
-    const values = row.values.slice();
-    Object.keys(fields).forEach(function (name) { values[table.col(name)] = fields[name]; });
-    table.sheet.getRange(row.row, 1, 1, values.length).setValues([values]);
+    const fresh = freshOwnNewRow_(table, ownNewApplication_(table, input.number, author), input.number);
+    // Меняются только столбцы заявки; в остальных — то, что сейчас в таблице: формулы остаются формулами,
+    // правки оформителя не затираются
+    const values = fresh.values.slice();
+    const output = table.headers.map(function (h, i) {
+      if (fields.hasOwnProperty(h)) {
+        values[i] = fields[h];
+        return safeCell_(fields[h]);
+      }
+      return fresh.formulas[i] || safeCell_(fresh.values[i]);
+    });
+    fresh.range.setValues([output]);
     log_(ss, 'Заявка изменена', user, { athleteId: author.id, text: '№ ' + input.number });
     return { status: 'success', number: Number(input.number), row: rowObject(values) };
   }
@@ -564,7 +585,7 @@ function saveApplication_(user, input) {
   fields[APPLICATION_COLUMN.createdBy] = author.id;
   fields[APPLICATION_COLUMN.createdAt] = new Date();
   const newValues = table.headers.map(function (h) { return fields.hasOwnProperty(h) ? fields[h] : ''; });
-  table.sheet.appendRow(newValues);
+  table.sheet.appendRow(safeRow_(newValues));
   log_(ss, 'Заявка создана', user, { athleteId: author.id, text: '№ ' + number + ', ' + fields[APPLICATION_COLUMN.competitionTitle] });
   return { status: 'success', number: number, row: rowObject(newValues) };
 }
@@ -577,13 +598,14 @@ function deleteApplication_(user, number) {
   const table = readTable_(ss, SHEET.applications);
   const row = ownNewApplication_(table, number, author);
   const archive = readTable_(ss, SHEET.applicationsArchive);
+  const fresh = freshOwnNewRow_(table, row, number);
 
   const archived = archive.headers.map(function (h) {
     if (h === APPLICATION_COLUMN.status) return APPLICATION_STATUS.deleted;
     const i = table.headers.indexOf(h);
-    return i === -1 ? '' : row.values[i];
+    return i === -1 ? '' : fresh.values[i];
   });
-  archive.sheet.appendRow(archived);
+  archive.sheet.appendRow(safeRow_(archived));
   table.sheet.deleteRow(row.row);
 
   log_(ss, 'Заявка удалена', user, { athleteId: author.id, text: '№ ' + number + ' перенесена в «' + SHEET.applicationsArchive + '»' });
@@ -610,6 +632,23 @@ function ownNewApplication_(table, number, author) {
     throw userError_('Заявка № ' + number + ' уже в статусе «' + status + '» — изменить или удалить её нельзя');
   }
   return row;
+}
+
+// Строка заявки, перечитанная из таблицы прямо перед записью или удалением. Пока скрипт читал лист, оформитель мог
+// вставить, удалить или отсортировать строки (по запомненному номеру строки теперь другая заявка) или взять заявку
+// в работу. Тогда действие не выполняется — повтор через минуту найдёт строку заново.
+// { range, values, formulas } — диапазон строки, её значения и формулы (пусто — в ячейке не формула)
+function freshOwnNewRow_(table, row, number) {
+  const range = table.sheet.getRange(row.row, 1, 1, table.headers.length);
+  const values = range.getValues()[0];
+  if (String(values[0]).trim() !== String(number).trim()) {
+    throw userError_('Таблицу заявок сейчас правят — попробуйте ещё раз через минуту');
+  }
+  const status = String(values[table.col(APPLICATION_COLUMN.status)]).trim();
+  if (status !== APPLICATION_STATUS.new) {
+    throw userError_('Заявка № ' + number + ' уже в статусе «' + status + '» — изменить или удалить её нельзя');
+  }
+  return { range: range, values: values, formulas: range.getFormulas()[0] };
 }
 
 // Значения столбцов заявки (кроме №, статуса и автора) по выбору из приложения
@@ -710,11 +749,11 @@ function assignWeapon_(user, weaponId) {
   const link = { athleteId: athlete.id, weaponId: String(weaponId) };
   if (already) return { status: 'success', message: title + ' уже закреплено за вами', link: link };
 
-  links.sheet.appendRow(links.headers.map(function (h) {
+  links.sheet.appendRow(safeRow_(links.headers.map(function (h) {
     if (h === ATHLETE_WEAPON_COLUMN.athleteId) return athlete.id;
     if (h === ATHLETE_WEAPON_COLUMN.weaponId) return String(weaponId);
     return '';
-  }));
+  })));
   log_(ss, 'Оружие закреплено', user, { athleteId: athlete.id, text: title });
   return { status: 'success', message: title + ' закреплено за вами', link: link };
 }
@@ -736,10 +775,18 @@ function unassignWeapon_(user, weaponId) {
   const link = { athleteId: athlete.id, weaponId: String(weaponId) };
   if (!mine.length) return { status: 'success', message: 'Это оружие уже не закреплено за вами', link: link };
 
-  // Снизу вверх, чтобы номера ещё не удалённых строк не сдвигались
-  mine.map(function (r) { return r.row; }).sort(function (a, b) { return b - a; }).forEach(function (row) {
-    links.sheet.deleteRow(row);
+  // Перед удалением строки перечитываются: если строки на листе сдвинулись (их вставили, удалили или отсортировали
+  // вручную), по запомненным номерам уже другие связи — тогда ничего не удаляем
+  const rows = mine.map(function (r) { return r.row; }).sort(function (a, b) { return b - a; });
+  const current = links.sheet.getRange(rows[rows.length - 1], 1, rows[0] - rows[rows.length - 1] + 1, links.headers.length).getValues();
+  rows.forEach(function (row) {
+    const values = current[row - rows[rows.length - 1]];
+    if (String(values[athleteCol]).trim() !== athlete.id || String(values[weaponCol]).trim() !== String(weaponId)) {
+      throw userError_('Таблицу сейчас правят — попробуйте ещё раз через минуту');
+    }
   });
+  // Снизу вверх, чтобы номера ещё не удалённых строк не сдвигались
+  rows.forEach(function (row) { links.sheet.deleteRow(row); });
 
   const weapons = readTable_(ss, SHEET.weapons);
   const weapon = findById_(weapons, weaponId);
@@ -956,14 +1003,12 @@ function readSheets_(ss, names, athleteId) {
       return row.some(function (cell) { return cell !== ''; });
     });
 
-    // Телефоны, ChatId и настройки уведомлений других спортсменов приложению не нужны (участников выбирают по ФИО) —
-    // отдаём только свои
+    // У других спортсменов отдаются только столбцы ATHLETE_PUBLIC_COLUMNS (участников выбирают по ФИО), своя строка —
+    // целиком. Столбцы, добавленные в лист позже (документы, даты рождения и т.п.), другим так не попадут
     if (name === SHEET.athletes) {
-      const hidden = [ATHLETE_COLUMN.phone, ATHLETE_COLUMN.chatId, ATHLETE_COLUMN.notifyCompetitions, ATHLETE_COLUMN.notifyApplications]
-        .map(function (column) { return headers.indexOf(column); });
       rows = rows.map(function (row) {
         if (String(row[0]).trim() === athleteId) return row;
-        return row.map(function (cell, i) { return hidden.indexOf(i) === -1 ? cell : ''; });
+        return row.map(function (cell, i) { return i === 0 || ATHLETE_PUBLIC_COLUMNS.indexOf(headers[i]) !== -1 ? cell : ''; });
       });
     }
 
@@ -1316,9 +1361,10 @@ function assignMissingIds_(range) {
 // Рассылка подтверждённым перевозчикам о новых соревнованиях в строках правки: заполнены все
 // NEW_COMPETITION_REQUIRED, столбец «Рассылка» пуст, соревнование ещё не началось. После рассылки в «Рассылку»
 // пишется её время — поэтому каждое соревнование рассылается один раз, и последующие правки строки рассылку не повторяют.
-// Под блокировкой: два быстрых срабатывания триггера подряд иначе оба увидели бы пустую отметку
+// Под блокировкой: два быстрых срабатывания триггера подряд иначе оба увидели бы пустую отметку. Блокировка — таблицы,
+// а не скрипта: рассылка всем перевозчикам идёт долго, и запросы приложения (doPost) не должны её ждать
 function notifyNewCompetitions_(ss, range) {
-  const lock = LockService.getScriptLock();
+  const lock = LockService.getDocumentLock() || LockService.getScriptLock();
   if (!lock.tryLock(20000)) return; // не дождались — строку подхватит следующая правка
   try {
     const competitions = readTable_(ss, SHEET.competitions);
@@ -1393,8 +1439,12 @@ function notifyConfirmedAthletes_(ss, range) {
   const statusCol = readTable_(ss, SHEET.athletes).col(ATHLETE_COLUMN.status) + 1;
   if (!columnInRange_(range, statusCol)) return;
 
-  table.athletes.forEach(function (athlete) {
-    if (!rowInRange_(range, athlete.row) || athlete.status !== ATHLETE_STATUS.confirmed || !athlete.chatId) return;
+  const items = table.athletes.map(function (athlete) {
+    return { id: athlete.id, row: athlete.row, status: athlete.status, athlete: athlete };
+  });
+  notifyStatusChanges_(SHEET.athletes, items, range, [ATHLETE_STATUS.confirmed], function (item) {
+    const athlete = item.athlete;
+    if (!athlete.chatId) return;
     notify_(ss, athlete, 'Здравствуйте, ' + athlete.greetingName + '! Ваш доступ к приложению подтверждён.',
       'Уведомление: доступ подтверждён');
   });
@@ -1405,20 +1455,67 @@ function notifyApplicationStatus_(ss, range) {
   if (!columnInRange_(range, applications.col(APPLICATION_COLUMN.status) + 1)) return;
   const athletes = athletesTable_(ss);
 
-  applications.rows.forEach(function (row) {
-    if (!rowInRange_(range, row.row)) return;
-    const status = String(applications.get(row, APPLICATION_COLUMN.status)).trim();
-    if (NOTIFY_APPLICATION_STATUSES.indexOf(status) === -1) return;
-
+  const items = applications.rows.map(function (row) {
+    return { id: String(row.values[0]).trim(), row: row.row, status: String(applications.get(row, APPLICATION_COLUMN.status)).trim(), source: row };
+  });
+  notifyStatusChanges_(SHEET.applications, items, range, NOTIFY_APPLICATION_STATUSES, function (item) {
+    const row = item.source;
     const authorId = String(applications.get(row, APPLICATION_COLUMN.createdBy)).trim();
     const author = findAthlete_(athletes, function (a) { return a.id === authorId; });
     if (!author || !author.chatId || !author.wantsApplications) return;
 
-    const number = row.values[0];
     const title = String(applications.get(row, APPLICATION_COLUMN.competitionTitle)).trim();
-    notify_(ss, author, 'Заявка № ' + number + (title ? ' (' + title + ')' : '') + ': статус изменён на «' + status + '».',
-      'Уведомление: заявка № ' + number + ' — ' + status);
+    notify_(ss, author, 'Заявка № ' + item.id + (title ? ' (' + title + ')' : '') + ': статус изменён на «' + item.status + '».',
+      'Уведомление: заявка № ' + item.id + ' — ' + item.status);
   });
+}
+
+// Уведомления о смене статуса строк. Правка диапазоном (вставка, протягивание) не сообщает прежних значений, поэтому
+// скрипт помнит, о каком статусе каждой строки уже сообщил (свойство скрипта notified:<лист>:<ID>), и пишет только
+// при новом статусе: повторная вставка того же статуса сообщений не шлёт. Статус сменили на тот, о котором не сообщаем, —
+// память строки стирается, и если статус вернут, сообщение уйдёт снова.
+// items — [{ id, row, status }] всех строк листа; notifyStatuses — о каких статусах сообщать; send(item) — отправка
+function notifyStatusChanges_(sheetName, items, range, notifyStatuses, send) {
+  const props = PropertiesService.getScriptProperties();
+  const known = props.getProperties();
+  const present = {};
+  items.forEach(function (item) { if (item.id) present[notifiedKey_(sheetName, item.id)] = true; });
+  // Строки, которых на листе больше нет (удалены, перенесены в архив), забываем — память не растёт
+  Object.keys(known).forEach(function (key) {
+    if (key.indexOf(notifiedKey_(sheetName, '')) === 0 && !present[key]) props.deleteProperty(key);
+  });
+
+  // Первый запуск: о строках, которые уже были в таком статусе, сообщать не нужно — запоминаем их без сообщений.
+  // Кроме строки, где только что сменили статус одной ячейкой: это настоящая смена
+  const seededKey = 'notified-seeded:' + sheetName;
+  const singleCell = range.getNumRows() === 1 && range.getNumColumns() === 1;
+  if (!known[seededKey]) {
+    const seed = {};
+    items.forEach(function (item) {
+      if (!item.id || notifyStatuses.indexOf(item.status) === -1) return;
+      if (singleCell && item.row === range.getRow()) return;
+      seed[notifiedKey_(sheetName, item.id)] = item.status;
+    });
+    seed[seededKey] = new Date().toISOString();
+    props.setProperties(seed);
+    Object.keys(seed).forEach(function (key) { known[key] = seed[key]; });
+  }
+
+  items.forEach(function (item) {
+    if (!item.id || !rowInRange_(range, item.row)) return;
+    const key = notifiedKey_(sheetName, item.id);
+    if (notifyStatuses.indexOf(item.status) === -1) {
+      if (known[key]) props.deleteProperty(key);
+      return;
+    }
+    if (known[key] === item.status) return;
+    props.setProperty(key, item.status);
+    send(item);
+  });
+}
+
+function notifiedKey_(sheetName, id) {
+  return 'notified:' + sheetName + ':' + id;
 }
 
 // Сообщение спортсмену от бота с кнопкой, открывающей Mini App; результат — в журнал
@@ -1488,13 +1585,25 @@ function log_(ss, event, user, details) {
       sheet.appendRow(LOG_COLUMNS);
       sheet.setFrozenRows(1);
     }
-    sheet.appendRow(row);
+    sheet.appendRow(safeRow_(row));
   } catch (err) {
     console.error('Не удалось записать в лист ' + SHEET.log + ': ' + err);
   }
 }
 
 // ---------- Утилиты ----------
+
+// Текст, который Google Таблицы приняли бы за формулу (начинается с =, +, -, @), записывается как текст —
+// с апострофом впереди, как при ручном вводе; в ячейке он виден без апострофа. Иначе через ФИО в заявке на доступ
+// или имя в профиле Telegram (оно попадает в «_Журнал») можно подставить в таблицу формулу — например, IMPORTXML,
+// которая при открытии таблицы отправит данные листов на чужой сервер. Применяется ко всему, что скрипт пишет в листы
+function safeCell_(value) {
+  return typeof value === 'string' && /^[=+\-@]/.test(value) ? "'" + value : value;
+}
+
+function safeRow_(row) {
+  return row.map(safeCell_);
+}
 
 // 79001234567 → +7 900 123-45-67
 function formatPhone_(digits) {

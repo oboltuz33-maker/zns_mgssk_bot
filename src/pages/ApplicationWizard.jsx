@@ -16,6 +16,7 @@ import {
   weaponLines,
 } from '../data/applications.js';
 import { withApplicationRow } from '../data/patches.js';
+import { newRequestId } from '../data/network.js';
 import {
   Badge,
   EmptyState,
@@ -64,6 +65,11 @@ export function ApplicationWizard({ model, me, params, sheets, onOpenPage, onCan
   const [attempted, setAttempted] = useState(false);
   const [result, setResult] = useState(null); // { number, isEdit } — заявка отправлена
   const touched = useRef(false);
+  // Номер запроса отправки этого черновика: повторное нажатие после ошибки связи сервер узнает и не создаст вторую
+  // заявку. После изменения черновика — новый номер (это уже другой запрос)
+  const requestId = useRef(null);
+  // Отправка идёт — второе быстрое нажатие главной кнопки (раньше, чем отрисуется busy) игнорируется
+  const submitting = useRef(false);
 
   const stepInfo = WIZARD_STEPS[step];
   const problem = result ? null : stepProblem(stepInfo.id, draft, model);
@@ -71,6 +77,7 @@ export function ApplicationWizard({ model, me, params, sheets, onOpenPage, onCan
 
   const update = (changes) => {
     touched.current = true;
+    requestId.current = null;
     setDraft((d) => ({ ...d, ...changes }));
   };
 
@@ -91,10 +98,13 @@ export function ApplicationWizard({ model, me, params, sheets, onOpenPage, onCan
   }, [me, draft, step, result]);
 
   const submit = async () => {
+    if (submitting.current) return;
+    submitting.current = true;
     setBusy(true);
     setError(null);
+    requestId.current ??= newRequestId();
     try {
-      const response = await saveApplication(draft);
+      const response = await saveApplication(draft, requestId.current);
       if (response.status !== 'success') throw new Error(response.message || 'Не удалось сохранить заявку');
       if (me && !draft.number) clearSavedDraft(me);
       tg()?.HapticFeedback?.notificationOccurred('success');
@@ -108,11 +118,13 @@ export function ApplicationWizard({ model, me, params, sheets, onOpenPage, onCan
       setError(e.message || 'Ошибка сети');
       tg()?.HapticFeedback?.notificationOccurred('error');
     } finally {
+      submitting.current = false;
       setBusy(false);
     }
   };
 
   const goNext = () => {
+    if (submitting.current) return;
     if (result) return onOpenPage('applications');
     if (problem) {
       setAttempted(true);

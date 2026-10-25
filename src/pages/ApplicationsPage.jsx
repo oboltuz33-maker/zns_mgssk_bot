@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { APPLICATION_STATUS, findMyAthlete } from '../data/model.js';
+import { APPLICATION_STATUS, findMyAthlete, isUpcomingCompetition } from '../data/model.js';
 import { deleteApplication } from '../data/applications.js';
 import { withoutApplication } from '../data/patches.js';
 import { Badge, EmptyState, PageHeader, SearchInput, ShowMore, confirmAction, formatDateTime, formatRange, usePaged } from '../components.jsx';
@@ -99,16 +99,19 @@ export function ApplicationsPage({ model, user, sheets, onOpenPage, onMessage })
               </div>
               {a.createdAt && <div className="item-hint">Создана {formatDateTime(a.createdAt)}</div>}
 
-              {/* Менять и удалять можно, пока оформитель не взял заявку в работу */}
+              {/* Менять и удалять можно, пока оформитель не взял заявку в работу; менять — пока соревнование
+                  не началось (иначе скрипт изменение не примет), удалять — и после */}
               {a.canEdit && (
                 <div className="card-actions">
-                  <button
-                    className="secondary-button"
-                    onClick={() => onOpenPage('application-form', { number: a.number })}
-                    disabled={deleting === a.number}
-                  >
-                    ✏️ Изменить
-                  </button>
+                  {isUpcomingCompetition({ start: a.ekpStart }) && (
+                    <button
+                      className="secondary-button"
+                      onClick={() => onOpenPage('application-form', { number: a.number })}
+                      disabled={deleting === a.number}
+                    >
+                      ✏️ Изменить
+                    </button>
+                  )}
                   <button className="secondary-button danger" onClick={() => remove(a)} disabled={deleting === a.number}>
                     {deleting === a.number ? 'Удаляем…' : '🗑 Удалить'}
                   </button>
