@@ -105,10 +105,3 @@ export async function fetchSheets({ fresh = false } = {}) {
   writeCache(data);
   return data;
 }
-
-// Поиск без учёта регистра по всем столбцам строки
-export function filterRows(rows, query) {
-  const q = query.trim().toLowerCase();
-  if (!q) return rows;
-  return rows.filter((row) => Object.values(row).some((v) => String(v).toLowerCase().includes(q)));
-}

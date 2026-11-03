@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { APPLICATION_STATUS, findMyAthlete, isUpcomingCompetition } from '../data/model.js';
+import { APPLICATION_STATUS, isUpcomingCompetition } from '../data/model.js';
 import { deleteApplication } from '../data/applications.js';
 import { withoutApplication } from '../data/patches.js';
 import { Badge, EmptyState, PageHeader, SearchInput, ShowMore, confirmAction, formatDateTime, formatRange, usePaged } from '../components.jsx';
@@ -12,9 +12,8 @@ const STATUS_TONE = {
   [APPLICATION_STATUS.archived]: 'muted',
 };
 
-export function ApplicationsPage({ model, user, sheets, onOpenPage, onMessage }) {
+export function ApplicationsPage({ model, me, sheets, onOpenPage, onMessage }) {
   // Показываем только заявки текущего спортсмена (CreatedBy = его ID; отбор делает и Apps Script)
-  const me = findMyAthlete(model, user);
   const [query, setQuery] = useState('');
   const [deleting, setDeleting] = useState(null);
 
@@ -48,14 +47,10 @@ export function ApplicationsPage({ model, user, sheets, onOpenPage, onMessage })
     <>
       <PageHeader title="Мои заявки" subtitle={me ? `${me.fullName} · всего: ${mine.length}` : undefined} />
 
-      {!me ? (
-        <EmptyState icon="👤" title="Спортсмен не определён">
-          {user
-            ? <>Укажите в листе «Спортсмены» ChatId <code>{user.id}</code>, чтобы видеть свои заявки</>
-            : 'Откройте приложение из Telegram, чтобы видеть свои заявки'}
+      {!me?.isCarrier ? (
+        <EmptyState icon="🚚" title="Создавать заявки могут только перевозчики">
+          Вас могут включить в заявку перевозчики клуба
         </EmptyState>
-      ) : !me.isCarrier ? (
-        <EmptyState icon="🚚" title="Создавать заявки могут только перевозчики" />
       ) : (
         <>
           <button className="primary-button wide-button" onClick={() => onOpenPage('application-form', {})}>

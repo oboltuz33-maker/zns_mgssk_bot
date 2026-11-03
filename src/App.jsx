@@ -1,12 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useSheets } from './data/useSheets.js';
 import { buildModel, findMyAthlete } from './data/model.js';
 import { requestWriteAccess } from './data/auth.js';
 import { ENV_LABEL, storageKey } from './config.js';
 import { EmptyState } from './components.jsx';
-import { HomePage } from './pages/HomePage.jsx';
 import { CompetitionsPage } from './pages/CompetitionsPage.jsx';
-import { AthletesPage } from './pages/AthletesPage.jsx';
 import { WeaponsPage } from './pages/WeaponsPage.jsx';
 import { ApplicationsPage } from './pages/ApplicationsPage.jsx';
 import { AuthScreen } from './pages/AuthScreen.jsx';
@@ -21,6 +19,7 @@ const EnvLabel = () => (ENV_LABEL ? <div className="env-label">{ENV_LABEL}</div>
 // Разделы приложения. menu — показывать в нижнем меню (в порядке списка),
 // primary — главная кнопка меню: выделена и открывается при запуске.
 // focused — страница без нижнего меню (мастер заявки: чтобы случайно не уйти с несохранённым вводом).
+// back — куда ведёт кнопка «Назад» Telegram (по умолчанию — на стартовую).
 // Разделы вне меню доступны по адресу ?page=<id>
 const PAGES = [
   { id: 'competitions', icon: '🏆', label: 'Соревнования', component: CompetitionsPage, menu: true },
@@ -28,15 +27,12 @@ const PAGES = [
   { id: 'weapons', icon: '🎯', label: 'Оружие', component: WeaponsPage, menu: true },
   // «Профиль» — не в меню, а значком 👤 в правом верхнем углу страниц; «Помощь» открывается из профиля
   { id: 'profile', icon: '👤', label: 'Профиль', component: ProfilePage },
-  { id: 'help', icon: '❓', label: 'Помощь', component: HelpPage },
-  { id: 'home', icon: '🏠', label: 'Главная', component: HomePage },
-  { id: 'athletes', icon: '👤', label: 'Спортсмены', component: AthletesPage },
+  { id: 'help', icon: '❓', label: 'Помощь', component: HelpPage, back: 'profile' },
   { id: 'application-form', icon: '📝', label: 'Заявка', component: ApplicationWizard, focused: true },
 ];
 const START_PAGE = PAGES.find((p) => p.primary).id;
 const MENU = PAGES.filter((p) => p.menu);
 
-// Начальный раздел можно задать в адресе: ?page=weapons
 // Сообщение пользователю: в Telegram — его окном, вне Telegram — обычным alert
 const showMessage = (text) => {
   const tg = window.Telegram?.WebApp;
@@ -44,6 +40,7 @@ const showMessage = (text) => {
   else alert(text);
 };
 
+// Начальный раздел можно задать в адресе: ?page=weapons
 const initialPage = () => {
   const fromUrl = new URLSearchParams(location.search).get('page');
   return PAGES.some((p) => p.id === fromUrl) ? fromUrl : START_PAGE;
@@ -59,61 +56,31 @@ const initialParams = () => {
 // Когда открыто приложение: данные, загруженные раньше (сохранённые на устройстве), могут не знать о новом соревновании
 const APP_STARTED_AT = Date.now();
 
+// Пользователь Telegram (SDK входит в сборку, поэтому данные есть сразу). Вне Telegram — null
+const telegramUser = () => window.Telegram?.WebApp?.initDataUnsafe?.user ?? null;
+
 function App() {
-  const [user, setUser] = useState(null);
-  const [debugMessage, setDebugMessage] = useState("Ожидание Telegram...");
+  const [user] = useState(telegramUser);
   const [page, setPage] = useState(initialPage);
   // Параметры страницы, например { competitionId } или { number } для мастера заявки
   const [pageParams, setPageParams] = useState(initialParams);
   // Листы таблицы загружаются один раз на всё приложение и доступны всем страницам
   const sheets = useSheets();
   const model = useMemo(() => buildModel(sheets.data), [sheets.data]);
-  const me = findMyAthlete(model, user);
-
-  const checkTelegramEnv = () => {
-    // Проверяем наличие глобального объекта Telegram
-    if (window.Telegram?.WebApp?.initDataUnsafe) {
-      const tg = window.Telegram.WebApp;
-      tg.ready();
-      tg.expand();
-
-      // На компьютере expand() не влияет на размер окна — просим полноэкранный режим (Bot API 8.0+).
-      // На телефоне не включаем, там достаточно expand().
-      const isDesktop = ['tdesktop', 'macos', 'web', 'weba', 'webk'].includes(tg.platform);
-      if (isDesktop && tg.isVersionAtLeast('8.0') && !tg.isFullscreen) {
-        tg.requestFullscreen();
-      }
-
-      if (tg.initDataUnsafe.user) {
-        setUser(tg.initDataUnsafe.user);
-        setDebugMessage("Подключено, Telegram ID " + tg.initDataUnsafe.user.id);
-      } else {
-        setDebugMessage("Окружение TG найдено, но данные пользователя (initData) пусты.");
-      }
-      return true; // Успешно определили Telegram
-    }
-    return false; // Пока не нашли Telegram
-  };
+  const me = findMyAthlete(model);
+  // Мастер заявки — только для перевозчиков. По ссылке из бота его может открыть и не перевозчик (например, того,
+  // кого перестали считать перевозчиком), — тогда открываются «Заявки», где объяснено, кто подаёт заявки
+  const pageId = page === 'application-form' && sheets.data && !me?.isCarrier ? 'applications' : page;
 
   useEffect(() => {
-    // Проверяем сразу
-    if (checkTelegramEnv()) return;
-
-    // Если не нашли, проверяем КАЖДУЮ секунду в течение 10 секунд
-    let secondsPassed = 0;
-    const interval = setInterval(() => {
-      secondsPassed++;
-      const found = checkTelegramEnv();
-
-      if (found) {
-        clearInterval(interval);
-      } else if (secondsPassed >= 10) { // Даем смартфону целых 10 секунд на прогрузку скрипта Telegram
-        clearInterval(interval);
-        setDebugMessage("Приложение запущено вне Telegram (или скрипт заблокирован в вашей сети).");
-      }
-    }, 1000);
-
-    return () => clearInterval(interval);
+    const tg = window.Telegram?.WebApp;
+    if (!tg?.initData) return;
+    tg.ready();
+    tg.expand();
+    // На компьютере expand() не влияет на размер окна — просим полноэкранный режим (Bot API 8.0+).
+    // На телефоне не включаем, там достаточно expand().
+    const isDesktop = ['tdesktop', 'macos', 'web', 'weba', 'webk'].includes(tg.platform);
+    if (isDesktop && tg.isVersionAtLeast('8.0') && !tg.isFullscreen) tg.requestFullscreen();
   }, []);
 
   // Спортсменам, вошедшим до появления уведомлений, один раз на устройстве предлагаем разрешить боту писать
@@ -130,24 +97,25 @@ function App() {
     requestWriteAccess();
   }, [hasData]);
 
-  // Кнопка «Назад» Telegram: на любой странице, кроме стартовой, возвращает на стартовую.
+  // Кнопка «Назад» Telegram: на любой странице, кроме стартовой, возвращает на страницу из back или на стартовую.
   // На страницах focused (мастер заявки) кнопкой управляет сама страница — там «Назад» ведёт на предыдущий шаг
   useEffect(() => {
     const backButton = window.Telegram?.WebApp?.BackButton;
     if (!backButton || !window.Telegram.WebApp.isVersionAtLeast('6.1')) return;
-    if (PAGES.find((p) => p.id === page)?.focused) return;
+    const target = PAGES.find((p) => p.id === pageId);
+    if (target?.focused) return;
 
-    const goHome = () => setPage(START_PAGE);
-    if (page === START_PAGE) backButton.hide();
+    const goBack = () => setPage(target?.back ?? START_PAGE);
+    if (pageId === START_PAGE) backButton.hide();
     else backButton.show();
-    backButton.onClick(goHome);
-    return () => backButton.offClick(goHome);
-  }, [page]);
+    backButton.onClick(goBack);
+    return () => backButton.offClick(goBack);
+  }, [pageId]);
 
   // Мастер открыт по ссылке на соревнование, которого нет в данных. Пока не пришли данные, загруженные после
   // открытия приложения, ждём их (соревнование могли добавить только что). Нет и в свежих — уже началось или
   // удалено: открываем мастер с выбором соревнования
-  const linkedCompetitionMissing = page === 'application-form' && Boolean(pageParams.competitionId) && !pageParams.number &&
+  const linkedCompetitionMissing = pageId === 'application-form' && Boolean(pageParams.competitionId) && !pageParams.number &&
     !model.competitions.some((c) => c.id === pageParams.competitionId);
   const waitingForLinkedCompetition = linkedCompetitionMissing && !sheets.error && !(sheets.savedAt >= APP_STARTED_AT);
   useEffect(() => {
@@ -162,7 +130,7 @@ function App() {
     window.scrollTo(0, 0);
   };
 
-  const current = PAGES.find((p) => p.id === page);
+  const current = PAGES.find((p) => p.id === pageId);
   const Page = current.component;
 
   // Пока Apps Script не подтвердил спортсмена, разделы не показываем — только вход или загрузку
@@ -206,28 +174,25 @@ function App() {
     <div className="app">
       <EnvLabel />
       <main className="page">
-        {page !== 'profile' && !current.focused && (
+        {pageId !== 'profile' && !current.focused && (
           <button className="help-button" onClick={() => openPage('profile')} aria-label="Профиль">
             👤
           </button>
         )}
-        {page !== 'home' && sheets.loading && !sheets.data && <p className="sheet-meta">Загрузка таблицы…</p>}
-        {page !== 'home' && sheets.error && <p className="sheet-error">Не удалось загрузить таблицу: {sheets.error}</p>}
+        {sheets.error && <p className="sheet-error">Не удалось загрузить таблицу: {sheets.error}</p>}
 
         {waitingForLinkedCompetition ? (
           <EmptyState icon="⏳" title="Загружаем соревнование…" />
         ) : (
           <Page
             // key — мастер начинается заново при открытии с другими параметрами
-            key={page + JSON.stringify(pageParams)}
+            key={pageId + JSON.stringify(pageParams)}
             model={model}
             sheets={sheets}
             user={user}
             me={me}
             params={pageParams}
-            telegramStatus={debugMessage}
             onOpenPage={openPage}
-            onRecheckTelegram={checkTelegramEnv}
             onMessage={showMessage}
             onCancel={() => openPage('applications')}
           />
@@ -240,7 +205,7 @@ function App() {
             {MENU.map((item) => (
               <button
                 key={item.id}
-                className={['nav-item', item.primary && 'primary', item.id === page && 'active'].filter(Boolean).join(' ')}
+                className={['nav-item', item.primary && 'primary', item.id === pageId && 'active'].filter(Boolean).join(' ')}
                 onClick={() => openPage(item.id)}
               >
                 <span className="nav-icon">{item.icon}</span>

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { findMyAthlete, isUpcomingCompetition, moscowDay } from '../data/model.js';
+import { isUpcomingCompetition, moscowDay } from '../data/model.js';
 import { applicationsForCompetition } from '../data/applications.js';
 import { Badge, EmptyState, PageHeader, SearchInput, ShowMore, formatCompetitionDates, usePaged } from '../components.jsx';
 import { fuzzySearch } from '../data/search.js';
@@ -52,8 +52,7 @@ export function CompetitionCard({ competition, onApply, existing = [], onOpenApp
 
 // Раздел «Соревнования»: только предстоящие — Apps Script других не отдаёт (прошедшие переносятся в архив),
 // а здесь они дополнительно отсеиваются на случай данных, сохранённых на устройстве до начала соревнования
-export function CompetitionsPage({ model, user, onOpenPage }) {
-  const me = findMyAthlete(model, user);
+export function CompetitionsPage({ model, me, onOpenPage }) {
   const onApply = me?.isCarrier ? (c) => onOpenPage('application-form', { competitionId: c.id }) : undefined;
   const [query, setQuery] = useState('');
 

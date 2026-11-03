@@ -14,14 +14,6 @@
   text-align: center;
 }
 
-.status {
-  color: var(--hint);
-  background: var(--secondary-bg);
-  padding: 8px 12px;
-  border-radius: 8px;
-  font-size: 14px;
-}
-
 .card {
   padding: 15px;
   border-radius: 12px;
@@ -79,7 +71,6 @@
   color: var(--hint);
   margin-bottom: 4px;
 }
-
 
 .item-head {
   display: flex;
@@ -170,32 +161,6 @@
   min-width: 0;
 }
 
-.stats {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
-  margin-top: 12px;
-}
-
-.stat {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  padding: 12px 14px;
-  border: none;
-  border-radius: 14px;
-  background: var(--secondary-bg);
-  color: var(--text);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.stat-icon { font-size: 20px; }
-.stat-value { font-size: 24px; font-weight: 700; }
-.stat-label { font-size: 13px; color: var(--hint); }
-
 .empty-state {
   text-align: center;
   padding: 32px 16px;
@@ -205,19 +170,6 @@
 .empty-icon { font-size: 40px; }
 .empty-title { font-weight: 600; color: var(--text); margin-top: 8px; }
 .empty-text { font-size: 14px; margin-top: 4px; white-space: pre-line; }
-
-.service {
-  margin-top: 24px;
-  padding: 12px 14px;
-  border-radius: 14px;
-  border: 1px dashed rgba(127, 127, 127, 0.4);
-}
-
-.service summary {
-  cursor: pointer;
-  color: var(--hint);
-  font-size: 14px;
-}
 
 a {
   color: var(--tg-theme-link-color, #0088cc);
@@ -285,32 +237,6 @@ a {
   background: var(--bg);
   color: var(--text);
   font: inherit;
-}
-
-.sheet-table-wrap {
-  overflow-x: auto;
-  border-radius: 12px;
-  background: var(--secondary-bg);
-  margin-top: 8px;
-}
-
-.sheet-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 14px;
-}
-
-.sheet-table th,
-.sheet-table td {
-  padding: 8px 10px;
-  text-align: left;
-  white-space: nowrap;
-  border-bottom: 1px solid var(--bg);
-}
-
-.sheet-table th {
-  font-weight: 600;
-  color: var(--hint);
 }
 
 .help-list {
@@ -519,11 +445,6 @@ a {
   border: 1px solid rgba(240, 160, 0, 0.5);
 }
 
-.wizard-hint {
-  text-align: center;
-  margin-top: 12px;
-}
-
 .wizard-message {
   margin: 0 0 8px;
   text-align: center;
@@ -618,10 +539,6 @@ a {
   width: 20px;
   height: 20px;
   accent-color: var(--tg-theme-button-color, #0088cc);
-}
-
-.review-gap {
-  margin-top: 14px;
 }
 
 /* Второстепенные кнопки внутри карточки — на фоне страницы, с рамкой, иначе сливаются с карточкой */

@@ -11,13 +11,23 @@ export function useSheets() {
   // Когда данные последний раз правились на месте (patch). Загрузка, начатая раньше, могла уйти до
   // сохранения и вернуть таблицу без него — такой ответ не должен затереть только что сохранённое
   const lastPatchAt = useRef(0);
+  // Номер последней начатой загрузки и идёт ли она. Ответ на более раннюю загрузку, пришедший позже, отбрасывается
+  const lastRequest = useRef(0);
+  const loadingNow = useRef(false);
 
   // refresh({ fresh: true }) — по явной просьбе пользователя: данные читаются из таблицы мимо кэша скрипта
   const refresh = useCallback(async ({ fresh = false } = {}) => {
+    // Загрузка уже идёт — фоновая ещё одна не нужна (при возврате в приложение срабатывают два события сразу).
+    // Явная просьба пользователя (fresh) начинает новую загрузку, а ответ на прежнюю будет отброшен
+    if (loadingNow.current && !fresh) return;
+    const request = ++lastRequest.current;
+    loadingNow.current = true;
+    const isLatest = () => request === lastRequest.current;
     const startedAt = Date.now();
     setState((s) => ({ ...s, loading: true, error: null }));
     try {
       const data = await fetchSheets({ fresh });
+      if (!isLatest()) return;
       if (startedAt < lastPatchAt.current) {
         // Устаревший ответ отбрасываем: правка на месте уже актуальна, остальное обновится при следующей загрузке
         setState((s) => ({ ...s, loading: false }));
@@ -26,6 +36,7 @@ export function useSheets() {
       setState({ data, savedAt: Date.now(), loading: false, error: null, accessDenied: null });
     } catch (error) {
       console.error(error);
+      if (!isLatest()) return;
       if (error instanceof AccessDeniedError) {
         // Доступ закрыт — убираем и сохранённые на устройстве данные
         clearCache();
@@ -33,6 +44,8 @@ export function useSheets() {
       } else {
         setState((s) => ({ ...s, loading: false, error: error.message || 'Ошибка сети' }));
       }
+    } finally {
+      if (isLatest()) loadingNow.current = false;
     }
   }, []);
 

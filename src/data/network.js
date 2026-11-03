@@ -8,8 +8,8 @@ const RETRY_DELAYS_MS = [1000, 3000];
 // а запрос, оборванный без ошибки, иначе висел бы бесконечно
 const TIMEOUT_MS = 45000;
 
-export const NETWORK_ERROR_MESSAGE = 'Нет связи с сервером. Проверьте интернет и попробуйте ещё раз';
-export const TIMEOUT_MESSAGE = 'Сервер долго не отвечает. Попробуйте ещё раз';
+const NETWORK_ERROR_MESSAGE = 'Нет связи с сервером. Проверьте интернет и попробуйте ещё раз';
+const TIMEOUT_MESSAGE = 'Сервер долго не отвечает. Попробуйте ещё раз';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 

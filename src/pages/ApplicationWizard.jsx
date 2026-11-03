@@ -149,31 +149,45 @@ export function ApplicationWizard({ model, me, params, sheets, onOpenPage, onCan
   else if (step === REVIEW_STEP) mainText = draft.number ? 'Сохранить изменения' : 'Отправить заявку';
   else if (returnToReview) mainText = 'Готово';
 
+  // Обработчики кнопок Telegram подписываются один раз и вызывают актуальные goBack и goNext из ref —
+  // иначе каждая перерисовка (например, буква в поиске) переподписывала бы их и заново настраивала кнопки
+  const handlers = useRef({});
+  useEffect(() => {
+    handlers.current = { goBack, goNext };
+  });
+
   // Кнопка «Назад» в шапке Telegram — на предыдущий шаг (или обратно на проверку), а не выход из мастера
   useEffect(() => {
     const t = tg();
     if (!t?.isVersionAtLeast?.('6.1')) return;
+    const onBack = () => handlers.current.goBack();
     t.BackButton.show();
-    t.BackButton.onClick(goBack);
-    return () => t.BackButton.offClick(goBack);
-  });
+    t.BackButton.onClick(onBack);
+    return () => t.BackButton.offClick(onBack);
+  }, []);
 
   // Главная кнопка Telegram: текст по шагу; пока шаг не заполнен — бледнее, но нажимается и объясняет, чего не хватает
+  const incomplete = Boolean(problem);
   useEffect(() => {
     if (!native) return;
     const button = tg().MainButton;
     const theme = tg().themeParams || {};
     button.setParams({
       text: busy ? 'Отправляем…' : mainText,
-      color: problem ? theme.hint_color || '#a7a7a7' : theme.button_color || '#2481cc',
+      color: incomplete ? theme.hint_color || '#a7a7a7' : theme.button_color || '#2481cc',
       text_color: theme.button_text_color || '#ffffff',
       is_visible: true,
     });
     if (busy) button.showProgress(false);
     else button.hideProgress();
-    button.onClick(goNext);
-    return () => button.offClick(goNext);
-  });
+  }, [native, busy, mainText, incomplete]);
+  useEffect(() => {
+    if (!native) return;
+    const button = tg().MainButton;
+    const onMain = () => handlers.current.goNext();
+    button.onClick(onMain);
+    return () => button.offClick(onMain);
+  }, [native]);
   useEffect(() => () => hasMainButton() && tg().MainButton.hide(), []);
 
   // Пока заявка не отправлена, Telegram переспрашивает перед закрытием приложения

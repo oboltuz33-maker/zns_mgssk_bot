@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { postAction } from '../data/api.js';
 import { withAthleteFields } from '../data/patches.js';
-import { EmptyState, PageHeader } from '../components.jsx';
-import { AthleteStatus } from './AthletesPage.jsx';
+import { Badge, EmptyState, PageHeader } from '../components.jsx';
+import { ATHLETE_STATUS } from '../data/model.js';
 
 // Настройки уведомлений перевозчика: ключ — как в запросе setNotifications и в NOTIFY_COLUMN (data/model.js)
 const NOTIFICATIONS = [
@@ -53,7 +53,8 @@ export function ProfilePage({ model, me, sheets, onOpenPage, onMessage }) {
         <div className="item-title">{me.fullName}</div>
         {me.phone && <div className="item-row">📞 {formatPhone(me.phone)}</div>}
         <div className="item-tags">
-          <AthleteStatus athlete={me} />
+          {me.status && <Badge tone={me.status === ATHLETE_STATUS.confirmed ? 'success' : 'warning'}>{me.status}</Badge>}
+          {me.isCarrier && <Badge tone="accent">🚚 Перевозчик</Badge>}
         </div>
         <div className="item-hint">Нашли ошибку в данных — сообщите администратору.</div>
       </div>

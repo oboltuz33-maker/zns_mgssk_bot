@@ -1,4 +1,5 @@
 import { SHEET } from '../config.js';
+import { idColumn } from './model.js';
 
 // Правка загруженных данных листов на месте — после действия, которое Apps Script уже выполнил.
 // Так изменение видно сразу, а таблицу не нужно перекачивать целиком (экономия трафика и лимитов Apps Script).
@@ -36,5 +37,7 @@ export const withWeaponLink = (data, link) =>
 export const withoutWeaponLink = (data, link) => withRows(data, SHEET.athleteWeapons, (rows) => rows.filter((r) => !isLink(r, link)));
 
 // Поля строки спортсмена изменены (например, настройки уведомлений): fields — { заголовок: значение } из ответа Apps Script
-export const withAthleteFields = (data, athleteId, fields) =>
-  withRows(data, SHEET.athletes, (rows) => rows.map((r) => (String(r['ID']) === String(athleteId) ? { ...r, ...fields } : r)));
+export const withAthleteFields = (data, athleteId, fields) => {
+  const id = idColumn(data, SHEET.athletes);
+  return withRows(data, SHEET.athletes, (rows) => rows.map((r) => (String(r[id]) === String(athleteId) ? { ...r, ...fields } : r)));
+};

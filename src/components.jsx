@@ -36,7 +36,7 @@ export function ShowMore({ paged }) {
 const DATE_FORMAT = { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'Europe/Moscow' };
 const DATE_TIME_FORMAT = { ...DATE_FORMAT, hour: '2-digit', minute: '2-digit' };
 
-export const formatDate = (date) => (date ? date.toLocaleDateString('ru-RU', DATE_FORMAT) : '—');
+const formatDate = (date) => (date ? date.toLocaleDateString('ru-RU', DATE_FORMAT) : '—');
 
 export const formatDateTime = (date) => (date ? `${date.toLocaleString('ru-RU', DATE_TIME_FORMAT)} МСК` : '—');
 

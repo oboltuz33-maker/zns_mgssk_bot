@@ -23,6 +23,11 @@ const toDate = (value) => {
 // и подставлять в <input type="date">
 export const moscowDay = (date) => date.toLocaleDateString('sv-SE', { timeZone: 'Europe/Moscow' });
 
+// Значения столбца «Статус» листа «Спортсмены» (как в Apps Script)
+export const ATHLETE_STATUS = {
+  confirmed: 'Подтвержден',
+};
+
 // Значения столбца «Статус» заявки (как в Apps Script). Автор может менять и удалять только «Новую»
 export const APPLICATION_STATUS = {
   new: 'Новая',
@@ -46,7 +51,7 @@ const splitTitleNumber = (text) => {
 
 // Ячейка «Оружие» → [{ name: 'Фамилия И.О.', weapons: [{ title, number }] }].
 // Формат: по строке на спортсмена «Фамилия И.О. : Название - Номер ; Название - Номер»
-export const parseWeaponText = (value) =>
+const parseWeaponText = (value) =>
   textLines(value)
     .filter((line) => line.includes(' : '))
     .map((line) => {
@@ -65,6 +70,9 @@ export const shortName = (lastName, firstName, middleName) => {
 
 const rowsOf = (data, sheetName) => data?.sheets?.[sheetName]?.rows ?? [];
 
+// ID строки — в первом столбце листа, как его понимает Apps Script, как бы ни был подписан заголовок
+export const idColumn = (data, sheetName) => data?.sheets?.[sheetName]?.headers?.[0] ?? '';
+
 // Столбцы листа «Спортсмены» с настройками уведомлений перевозчика (ключ — как в запросе setNotifications)
 export const NOTIFY_COLUMN = {
   competitions: 'Сообщать о соревнованиях',
@@ -77,12 +85,8 @@ export const NOTIFY_COLUMN = {
 export const isUpcomingCompetition = (competition, now = new Date()) =>
   !competition.start || moscowDay(competition.start) >= moscowDay(now);
 
-// Текущий спортсмен. Его определяет Apps Script по подписанным данным Telegram (athleteId);
-// если athleteId в данных нет (старая версия скрипта) — по ChatId пользователя
-export const findMyAthlete = (model, user) =>
-  model.athletes.find((a) => a.id === model.athleteId) ||
-  (user && model.athletes.find((a) => a.chatId === String(user.id))) ||
-  null;
+// Текущий спортсмен. Его определяет Apps Script по подписанным данным Telegram (athleteId)
+export const findMyAthlete = (model) => model.athletes.find((a) => a.id === model.athleteId) ?? null;
 
 export function buildModel(data) {
   // Строки без идентификатора уже отброшены при загрузке (sheets.js) — здесь только их число по листам
@@ -93,7 +97,7 @@ export function buildModel(data) {
   );
 
   const weapons = rowsOf(data, SHEET.weapons).map((r) => ({
-    id: str(r['Ид']),
+    id: str(r[idColumn(data, SHEET.weapons)]),
     title: str(r['Название']),
     number: str(r['Номер']),
     owners: [],
@@ -104,7 +108,7 @@ export function buildModel(data) {
     const firstName = str(r['Имя']);
     const middleName = str(r['Отчество']);
     return {
-      id: str(r['ID']),
+      id: str(r[idColumn(data, SHEET.athletes)]),
       lastName,
       firstName,
       middleName,
@@ -112,8 +116,8 @@ export function buildModel(data) {
       shortName: shortName(lastName, firstName, middleName),
       // Обращение к спортсмену: «Имя Отчество», без отчества — «Имя Фамилия»
       greetingName: (middleName ? [firstName, middleName] : [firstName, lastName]).filter(Boolean).join(' '),
+      // Телефон виден только свой — у других спортсменов Apps Script его не отдаёт
       phone: str(r['Телефон']),
-      chatId: str(r['ChatId']),
       status: str(r['Статус']),
       isCarrier: str(r['Перевозчик']).toLowerCase() === 'да',
       // Настройки уведомлений (видны только свои): «Нет» — выключено, пусто или «Да» — включено
@@ -137,7 +141,7 @@ export function buildModel(data) {
 
   const competitions = rowsOf(data, SHEET.competitions)
     .map((r) => ({
-      id: str(r['ID']),
+      id: str(r[idColumn(data, SHEET.competitions)]),
       title: str(r['Название']),
       ekpNumber: str(r['Номер из ЕКП']),
       kind: str(r['Вид соревнования']),
@@ -150,11 +154,8 @@ export function buildModel(data) {
   const applications = rowsOf(data, SHEET.applications)
     .map((r) => ({
       number: str(r['№']),
-      fullName: str(r['ФИО']),
-      weapon: str(r['Оружие']),
       transportStart: toDate(r['Сроки перевозки начало']),
       transportEnd: toDate(r['Сроки перевозки окончание']),
-      transport: str(r['Вид транспорта']),
       competitionKind: str(r['Вид соревнования']),
       competitionTitle: str(r['Название соревнования']),
       ekpNumber: str(r['Номер в ЕКП']),
@@ -169,7 +170,6 @@ export function buildModel(data) {
       transportList: splitList(r['Вид транспорта']),
       // CreatedBy — ID спортсмена, создавшего заявку; CreatedAt — момент создания (московское время)
       createdById: str(r['CreatedBy']),
-      author: athleteById.get(str(r['CreatedBy'])) ?? null,
       createdAt: toDate(r['CreatedAt']),
     }))
     // Новые заявки сверху

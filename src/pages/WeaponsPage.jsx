@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import { findMyAthlete } from '../data/model.js';
 import { postAction } from '../data/api.js';
 import { withWeaponLink, withoutWeaponLink } from '../data/patches.js';
 import { fuzzySearch } from '../data/search.js';
@@ -11,8 +10,7 @@ const ROW_HEIGHT = 64;
 // Раздел «Оружие»: вкладка «Закреплённое» — своё оружие (можно открепить),
 // вкладка «Справочник» — общий справочник без своего, с поиском (можно закрепить за собой).
 // Оба списка показываются порциями по экрану с кнопкой «Показать ещё»
-export function WeaponsPage({ model, user, sheets, onMessage }) {
-  const me = findMyAthlete(model, user);
+export function WeaponsPage({ model, me, sheets, onMessage }) {
   const [tab, setTab] = useState('mine');
   const [query, setQuery] = useState('');
   const [busyId, setBusyId] = useState(null);

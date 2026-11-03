@@ -11,7 +11,7 @@ const STATUS_HELP = [
 ];
 
 // Раздел «Помощь»: как пользоваться приложением, версия и служебная информация
-export function HelpPage({ model, me, sheets, user, telegramStatus }) {
+export function HelpPage({ model, me, sheets, user }) {
   return (
     <>
       <PageHeader title="Помощь" subtitle="ДОСААФ МГССК" />
@@ -72,7 +72,6 @@ export function HelpPage({ model, me, sheets, user, telegramStatus }) {
             Telegram ID: <code>{user.id}</code>
           </div>
         )}
-        <div className="item-hint">{telegramStatus}</div>
         {Object.keys(model.skipped).length > 0 && (
           <div className="item-hint">
             Пропущены строки без ID:{' '}

@@ -168,12 +168,11 @@ const ATHLETE_STATUS = {
 const AUTO_CONFIRM_STATUSES = ['', ATHLETE_STATUS.addedManually];
 
 // Значения столбца «Статус» заявки. Автор может менять и удалять заявку только в статусе «Новая»;
-// остальные ставит оформитель, «Удалена» — при удалении автором (заявка уходит в архив)
+// остальные (и «Архив») ставит оформитель, «Удалена» — при удалении автором (заявка уходит в архив)
 const APPLICATION_STATUS = {
   new: 'Новая',
   inProgress: 'В работе',
   done: 'Выполнена',
-  archived: 'Архив',
   deleted: 'Удалена',
 };
 
@@ -191,7 +190,6 @@ const WEAPONS_SEPARATOR = ' ; ';
 // Листы, где каждому спортсмену видны только его строки: имя листа → столбец с ID спортсмена
 const USER_SCOPED_SHEETS = {
   [SHEET.applications]: APPLICATION_COLUMN.createdBy,
-  [SHEET.applicationsArchive]: APPLICATION_COLUMN.createdBy,
 };
 
 // Столбцы листа журнала
@@ -444,9 +442,8 @@ function register_(user, body) {
 
 // fromCache — для чтения (doGet) лист можно взять из кэша; для записи — только свежий
 function athletesTable_(ss, fromCache) {
-  const sheet = ss.getSheetByName(SHEET.athletes);
-  if (!sheet) throw new Error('Нет листа «' + SHEET.athletes + '»');
-
+  // Сам лист нужен только для записи — при чтении из кэша к таблице не обращаемся
+  const sheet = function () { return ss.getSheetByName(SHEET.athletes); };
   const values = sheetValues_(ss, SHEET.athletes, Boolean(fromCache));
   const headers = values[0].map(String);
   const col = function (name, required) {
@@ -492,14 +489,14 @@ function athletesTable_(ss, fromCache) {
     athletes: athletes,
     has: function (name) { return col(name) !== -1; },
     set: function (athlete, name, value) {
-      sheet.getRange(athlete.row, col(name, true) + 1).setValue(safeCell_(value));
+      sheet().getRange(athlete.row, col(name, true) + 1).setValue(safeCell_(value));
     },
     append: function (id, valuesByColumn) {
       const row = headers.map(function (h, i) {
         if (i === 0) return id;
         return valuesByColumn.hasOwnProperty(h) ? valuesByColumn[h] : '';
       });
-      sheet.appendRow(safeRow_(row));
+      sheet().appendRow(safeRow_(row));
     },
   };
 }
@@ -858,8 +855,9 @@ let freshRead_ = false;
 const SHEET_GENERATION_SECONDS = 6 * 60 * 60;
 
 // Значения листа вместе со строкой заголовков, без пустых столбцов справа от последнего заголовка.
-// fromCache — можно взять из CacheService (только для чтения)
-function sheetValues_(ss, name, fromCache) {
+// fromCache — можно взять из CacheService (только для чтения): тогда к таблице не обращаемся вовсе.
+// optional — листа нет в таблице: вернуть null, а не ошибку
+function sheetValues_(ss, name, fromCache, optional) {
   if (sheetValuesMemo_[name]) return sheetValuesMemo_[name];
   // Метки и копии берутся из кэша до чтения таблицы (см. выше). При принудительном обновлении (fresh)
   // копию не используем, но свежие данные под текущей меткой кладём
@@ -867,7 +865,10 @@ function sheetValues_(ss, name, fromCache) {
   let values = cached && !freshRead_ ? cached.values[name] : null;
   if (!values) {
     const sheet = ss.getSheetByName(name);
-    if (!sheet) throw new Error('Нет листа «' + name + '»');
+    if (!sheet) {
+      if (optional) return null;
+      throw new Error('Нет листа «' + name + '»');
+    }
     values = trimEmptyColumns_(sheet.getDataRange().getValues());
     if (cached && cached.generations[name]) cachePutSheet_(ss, name, cached.generations[name], values);
   }
@@ -995,9 +996,10 @@ function readSheets_(ss, names, athleteId) {
   const sheets = {};
 
   APP_SHEETS.forEach(function (name) {
-    if (wanted.indexOf(name) === -1 || !ss.getSheetByName(name)) return;
-
-    const values = sheetValues_(ss, name, true);
+    if (wanted.indexOf(name) === -1) return;
+    // Листа нет в таблице (например, справочник ещё не создан) — просто не отдаём его
+    const values = sheetValues_(ss, name, true, true);
+    if (!values) return;
     const headers = (values[0] || []).map(String);
     let rows = values.slice(1).filter(function (row) {
       return row.some(function (cell) { return cell !== ''; });

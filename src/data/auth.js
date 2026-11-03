@@ -6,7 +6,7 @@ export function requestContact() {
   return new Promise((resolve, reject) => {
     const tg = window.Telegram?.WebApp;
     if (!tg?.isVersionAtLeast?.('6.9')) {
-      reject(new Error('Ваша версия Telegram не умеет делиться номером — обновите приложение или введите ФИО'));
+      reject(new Error('Ваша версия Telegram не умеет делиться номером — обновите Telegram и откройте приложение снова'));
       return;
     }
     tg.requestContact((shared, event) => {
