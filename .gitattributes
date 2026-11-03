@@ -1,0 +1,5 @@
+# Переводы строк — LF и в репозитории, и в рабочей копии (как сейчас все файлы), чтобы на Windows git не менял их на CRLF
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary

@@ -2,7 +2,8 @@ import { useState } from 'react';
 import { postAction } from '../data/api.js';
 import { withWeaponLink, withoutWeaponLink } from '../data/patches.js';
 import { fuzzySearch } from '../data/search.js';
-import { Chips, EmptyState, PageHeader, SearchInput, ShowMore, confirmAction, usePaged } from '../components.jsx';
+import { Chips, EmptyState, PageHeader, SearchInput, ShowMore } from '../components.jsx';
+import { confirmAction, usePaged } from '../helpers.js';
 
 // Примерная высота строки списка — по ней считается, сколько строк помещается на экран
 const ROW_HEIGHT = 64;

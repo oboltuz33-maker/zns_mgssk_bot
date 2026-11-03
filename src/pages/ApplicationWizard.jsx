@@ -17,18 +17,8 @@ import {
 } from '../data/applications.js';
 import { withApplicationRow } from '../data/patches.js';
 import { newRequestId } from '../data/network.js';
-import {
-  Badge,
-  EmptyState,
-  PageHeader,
-  SearchInput,
-  ShowMore,
-  confirmAction,
-  formatCompetitionDates,
-  formatDateTime,
-  formatRange,
-  usePaged,
-} from '../components.jsx';
+import { Badge, EmptyState, PageHeader, SearchInput, ShowMore } from '../components.jsx';
+import { confirmAction, formatCompetitionDates, formatDateTime, formatRange, usePaged } from '../helpers.js';
 import { fuzzySearch } from '../data/search.js';
 
 // Примерная высота карточки соревнования и строки списка — по ним считается, сколько помещается на экран

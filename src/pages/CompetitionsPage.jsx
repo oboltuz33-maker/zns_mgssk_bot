@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { isUpcomingCompetition, moscowDay } from '../data/model.js';
 import { applicationsForCompetition } from '../data/applications.js';
-import { Badge, EmptyState, PageHeader, SearchInput, ShowMore, formatCompetitionDates, usePaged } from '../components.jsx';
+import { Badge, EmptyState, PageHeader, SearchInput, ShowMore } from '../components.jsx';
+import { formatCompetitionDates, usePaged } from '../helpers.js';
 import { fuzzySearch } from '../data/search.js';
 
 // Номер дня по московскому календарю — чтобы считать «через сколько дней» без влияния часового пояса телефона

@@ -1,0 +1,22 @@
+# Проверка при каждом push и pull request: линтер, тесты (приложение и Apps Script), сборка обоих окружений.
+# Выкладка остаётся ручной: npm run deploy / npm run deploy:test
+name: Проверка
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - run: npm run build:test

@@ -12,6 +12,11 @@ export default defineConfig(({ mode }) => {
       // Совместимость со старыми WebView на телефонах (Android System WebView, iOS Safari)
       target: ['es2019', 'safari13', 'chrome80'],
     },
+    test: {
+      include: ['tests/**/*.test.js'],
+      // Часовой пояс Apps Script (Europe/Moscow): даты скрипта считаются в нём
+      env: { TZ: 'Europe/Moscow' },
+    },
     define: {
       // Время сборки — показывается в приложении, чтобы видеть, какая версия открыта
       __BUILD_TIME__: JSON.stringify(new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' })),

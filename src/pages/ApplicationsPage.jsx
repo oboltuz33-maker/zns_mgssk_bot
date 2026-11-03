@@ -2,7 +2,8 @@ import { useState } from 'react';
 import { APPLICATION_STATUS, isUpcomingCompetition } from '../data/model.js';
 import { deleteApplication } from '../data/applications.js';
 import { withoutApplication } from '../data/patches.js';
-import { Badge, EmptyState, PageHeader, SearchInput, ShowMore, confirmAction, formatDateTime, formatRange, usePaged } from '../components.jsx';
+import { Badge, EmptyState, PageHeader, SearchInput, ShowMore } from '../components.jsx';
+import { confirmAction, formatDateTime, formatRange, usePaged } from '../helpers.js';
 import { fuzzySearch } from '../data/search.js';
 
 const STATUS_TONE = {
