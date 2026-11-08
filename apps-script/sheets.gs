@@ -1,9 +1,13 @@
 /**
- * Бэкенд Mini App: чтение листов таблицы и авторизация спортсменов.
+ * Бэкенд Mini App: вход спортсменов, отдача листов таблицы, заявки на перевозку, закрепление оружия,
+ * настройки и уведомления бота.
  *
- * GET  ?action=sheets&initData=<Telegram.WebApp.initData>[&names=A,B][&fresh=1]
+ * POST { action: 'sheets', initData, names?: [...], fresh?: true }
  *      Листы одним запросом — Mini App фильтрует их у себя, чтобы не расходовать лимиты.
- *      fresh=1 — прочитать таблицу мимо кэша (кнопка «Обновить» в приложении).
+ *      fresh — прочитать таблицу мимо кэша (кнопка «Обновить» в приложении). Запрос POST, а не GET:
+ *      подписанные данные Telegram в теле запроса не попадают в адрес и журналы Google.
+ * GET  ?action=sheets&initData=…[&names=A,B][&fresh=1]
+ *      То же для версий приложения до перехода на POST — убрать, когда старые версии перестанут открываться.
  * POST { action: 'linkPhone', initData, contact }
  *      Привязка по номеру телефона: contact — подписанный ответ Telegram.WebApp.requestContact.
  * POST { action: 'register', initData, lastName, firstName, middleName, contact }
@@ -36,12 +40,13 @@
  * Уведомления: при ручной смене статуса спортсмена на «Подтвержден» и статуса заявки на «В работе» /
  * «Выполнена» бот пишет спортсмену, а о новом соревновании (заполнены название, даты и адрес) — всем
  * подтверждённым перевозчикам, один раз; отметка — в столбце «Рассылка» (триггер onSheetEdit; создаётся один раз
- * функцией installTriggers).
+ * функцией installTriggers). Перевозчик может отключить в профиле рассылку о соревнованиях и сообщения о своих
+ * заявках (столбцы ATHLETE_COLUMN.notifyCompetitions / notifyApplications).
  * Настройка окружения и проверка — функции раздела «Настройка окружения» (checkSetup, setupMenuButton, …).
  *
  * Ответы: status = success | unregistered | pending | forbidden | expired | not_found | conflict | error
  * (expired — подпись Telegram верна, но приложение открыто больше INIT_DATA_MAX_AGE_SECONDS назад).
- * События входа пишутся в журнал выполнения и в служебный лист «_Журнал».
+ * События (вход, заявки, оружие, рассылки, ошибки доставки) пишутся в журнал выполнения и в служебный лист «_Журнал».
  *
  * Настройки окружения хранятся в свойствах скрипта, а не в коде, — поэтому один и тот же код работает
  * и в рабочем, и в тестовом окружении (у каждого свой бот, своя таблица и свой скрипт):
@@ -69,7 +74,7 @@ const SHEET = {
   athleteWeapons: 'Спортсмен/Оружие',
   // Справочник видов транспорта: первый столбец — название
   transportTypes: 'Виды транспорта',
-  // Журнал событий входа. Имя начинается с "_", поэтому приложению лист не отдаётся,
+  // Журнал событий. Имя начинается с "_", поэтому приложению лист не отдаётся,
   // а администратор видит его прямо в таблице. Создаётся автоматически при первой записи.
   log: '_Журнал',
 };
@@ -203,7 +208,7 @@ const NAME_MAX_LENGTH = 100;
 // Сколько помнить ответы на POST-запросы по requestId — чтобы повтор при обрыве связи не выполнил действие дважды
 const REQUEST_CACHE_SECONDS = 10 * 60;
 
-// Кэш листов для отдачи приложению (doGet): экономит время выполнения и лимиты Apps Script.
+// Кэш листов для отдачи приложению (загрузка листов, loadSheets_): экономит время выполнения и лимиты Apps Script.
 // Устаревает при записи через приложение и при ручной правке листа (см. «Работа с листами»); иначе живёт столько секунд
 const SHEET_CACHE_SECONDS = 5 * 60;
 // Лист больше этого размера (символов JSON) в кэш не кладётся — у CacheService предел 100 КБ на значение
@@ -219,6 +224,10 @@ const WRITES_SHEETS = {
   unassignWeapon: [SHEET.athleteWeapons],
   setNotifications: [SHEET.athletes],
 };
+
+// Ответы, с которыми действие ничего не записывает в листы (отказ в linkPhone и register; остальные действия при отказе
+// бросают userError_). 'pending' и 'forbidden' сюда не входят: linkPhone записывает ChatId и при таких статусах
+const NO_WRITE_STATUSES = ['error', 'not_found', 'conflict'];
 
 // Как связаться с администратором (например, '@username' или телефон) — подставляется
 // в сообщения пользователю, когда без администратора не обойтись. Пусто — не показывается.
@@ -239,6 +248,7 @@ const NEW_COMPETITION_REQUIRED = [COMPETITION_COLUMN.title, COMPETITION_COLUMN.s
 
 // ---------- Точки входа ----------
 
+// Загрузка листов старыми версиями приложения (initData в адресе запроса). Новые загружают через doPost
 function doGet(e) {
   const params = (e && e.parameter) || {};
   return handle_(function () {
@@ -247,13 +257,7 @@ function doGet(e) {
     }
     const user = verifyInitData_(params.initData);
     if (!user) return telegramDenied_(params.initData);
-
-    const ss = spreadsheet_();
-    freshRead_ = params.fresh === '1';
-    const athlete = findUser_(ss, athletesTable_(ss, true), user);
-    const denied = accessDenied_(athlete);
-    if (denied) return denied;
-    return readSheets_(ss, params.names, athlete.id);
+    return loadSheets_(user, params.names ? params.names.split(',') : null, params.fresh === '1');
   });
 }
 
@@ -262,10 +266,16 @@ function doPost(e) {
     const body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
     const user = verifyInitData_(body.initData);
     if (!user) return telegramDenied_(body.initData);
+    // Чтение — без блокировки и без памяти requestId: оно ничего не меняет, его можно повторять
+    if (body.action === 'sheets') {
+      return loadSheets_(user, Array.isArray(body.names) ? body.names : null, body.fresh === true);
+    }
 
     // Запись в лист — под блокировкой, чтобы параллельные запросы не создали дубликаты
     const lock = LockService.getScriptLock();
-    lock.waitLock(10000);
+    if (!lock.tryLock(10000)) {
+      return { status: 'error', message: 'Сервер занят другим запросом — попробуйте ещё раз через несколько секунд' };
+    }
     try {
       // Приложение повторяет запрос при обрыве связи. Если этот requestId уже выполнялся (запрос дошёл,
       // а ответ потерялся) — возвращаем прежний ответ, а не выполняем действие второй раз
@@ -276,13 +286,27 @@ function doPost(e) {
 
       const result = runAction_(user, body);
       if (cacheKey) cache.put(cacheKey, JSON.stringify(result), REQUEST_CACHE_SECONDS);
-      // Листы, в которые действие могло записать, — их кэш для чтения устарел
-      if (WRITES_SHEETS[body.action]) invalidateSheets_(WRITES_SHEETS[body.action]);
+      // Листы, в которые действие могло записать, — их кэш для чтения устарел. При отказе (NO_WRITE_STATUSES)
+      // действие ничего не записало — кэш не трогаем
+      if (WRITES_SHEETS[body.action] && NO_WRITE_STATUSES.indexOf(result.status) === -1) {
+        invalidateSheets_(WRITES_SHEETS[body.action]);
+      }
       return result;
     } finally {
       lock.releaseLock();
     }
   });
+}
+
+// Листы для приложения подтверждённому спортсмену. names — какие листы нужны (null — все из APP_SHEETS),
+// fresh — читать таблицу мимо кэша
+function loadSheets_(user, names, fresh) {
+  const ss = spreadsheet_();
+  freshRead_ = fresh;
+  const athlete = findUser_(ss, athletesTable_(ss, true), user);
+  const denied = accessDenied_(athlete);
+  if (denied) return denied;
+  return readSheets_(ss, names, athlete.id);
 }
 
 // Ошибки проверки (userError_) не кэшируются — при повторе запрос просто выполнится заново
@@ -440,7 +464,7 @@ function register_(user, body) {
 
 // ---------- Лист «Спортсмены» ----------
 
-// fromCache — для чтения (doGet) лист можно взять из кэша; для записи — только свежий
+// fromCache — для отдачи приложению (loadSheets_) лист можно взять из кэша; для записи — только свежий
 function athletesTable_(ss, fromCache) {
   // Сам лист нужен только для записи — при чтении из кэша к таблице не обращаемся
   const sheet = function () { return ss.getSheetByName(SHEET.athletes); };
@@ -487,6 +511,8 @@ function athletesTable_(ss, fromCache) {
 
   return {
     athletes: athletes,
+    // Индекс столбца (с 0) или -1, если столбца нет
+    col: col,
     has: function (name) { return col(name) !== -1; },
     set: function (athlete, name, value) {
       sheet().getRange(athlete.row, col(name, true) + 1).setValue(safeCell_(value));
@@ -609,11 +635,18 @@ function deleteApplication_(user, number) {
   return { status: 'success', number: Number(number) };
 }
 
-// Автор заявки — подтверждённый спортсмен-перевозчик
-function requireCarrier_(ss, user) {
-  const athlete = findUser_(ss, athletesTable_(ss), user);
+// Подтверждённый спортсмен пользователя Telegram; иначе — ошибка с причиной отказа.
+// table — лист «Спортсмены» (athletesTable_), если он уже прочитан и нужен для записи
+function requireConfirmed_(ss, user, table) {
+  const athlete = findUser_(ss, table || athletesTable_(ss), user);
   const denied = accessDenied_(athlete);
   if (denied) throw userError_(denied.message);
+  return athlete;
+}
+
+// Автор заявки — подтверждённый спортсмен-перевозчик
+function requireCarrier_(ss, user) {
+  const athlete = requireConfirmed_(ss, user);
   if (!athlete.isCarrier) throw userError_('Создавать заявки могут только перевозчики');
   return athlete;
 }
@@ -667,7 +700,9 @@ function buildApplication_(ss, author, input) {
     if (seen[athlete.id]) throw userError_(athlete.shortName + ' добавлен в заявку дважды');
     seen[athlete.id] = true;
 
-    const weaponIds = Array.isArray(item.weaponIds) ? item.weaponIds : [];
+    // Одна и та же единица, переданная дважды, записывается один раз
+    const weaponIds = (Array.isArray(item.weaponIds) ? item.weaponIds : []).map(String)
+      .filter(function (id, i, all) { return all.indexOf(id) === i; });
     if (!weaponIds.length) throw userError_('Выберите оружие для спортсмена ' + athlete.shortName);
     // Строка спортсмена: «Фамилия И.О. : Название - Номер ; Название - Номер»
     const athleteWeapons = weaponIds.map(function (weaponId) {
@@ -728,22 +763,18 @@ function nextApplicationNumber_(ss, table) {
 // Одна единица может быть закреплена за несколькими спортсменами.
 function assignWeapon_(user, weaponId) {
   const ss = spreadsheet_();
-  const athlete = findUser_(ss, athletesTable_(ss), user);
-  const denied = accessDenied_(athlete);
-  if (denied) throw userError_(denied.message);
+  const athlete = requireConfirmed_(ss, user);
 
   const weapons = readTable_(ss, SHEET.weapons);
   const weapon = findById_(weapons, weaponId);
   if (!weapon) throw userError_('Оружие не найдено — обновите данные и выберите заново');
-  const title = String(weapons.get(weapon, WEAPON_COLUMN.title)).trim() + ' ' + String(weapons.get(weapon, WEAPON_COLUMN.number)).trim();
+  const title = weaponTitle_(weapons, weapon);
 
   const links = readTable_(ss, SHEET.athleteWeapons);
-  const athleteCol = links.col(ATHLETE_WEAPON_COLUMN.athleteId);
-  const weaponCol = links.col(ATHLETE_WEAPON_COLUMN.weaponId);
-  const already = links.rows.some(function (r) {
-    return String(r.values[athleteCol]).trim() === athlete.id && String(r.values[weaponCol]).trim() === String(weaponId);
-  });
+  // Нет нужного столбца — ошибка до записи, а не строка без ID спортсмена или оружия
+  [ATHLETE_WEAPON_COLUMN.athleteId, ATHLETE_WEAPON_COLUMN.weaponId].forEach(function (column) { links.col(column); });
   const link = { athleteId: athlete.id, weaponId: String(weaponId) };
+  const already =links.rows.some(function (r) { return isLinkRow_(links, r.values, link); });
   if (already) return { status: 'success', message: title + ' уже закреплено за вами', link: link };
 
   links.sheet.appendRow(safeRow_(links.headers.map(function (h) {
@@ -759,17 +790,11 @@ function assignWeapon_(user, weaponId) {
 // На уже поданные заявки не влияет — в них оружие записано текстом.
 function unassignWeapon_(user, weaponId) {
   const ss = spreadsheet_();
-  const athlete = findUser_(ss, athletesTable_(ss), user);
-  const denied = accessDenied_(athlete);
-  if (denied) throw userError_(denied.message);
+  const athlete = requireConfirmed_(ss, user);
 
   const links = readTable_(ss, SHEET.athleteWeapons);
-  const athleteCol = links.col(ATHLETE_WEAPON_COLUMN.athleteId);
-  const weaponCol = links.col(ATHLETE_WEAPON_COLUMN.weaponId);
-  const mine = links.rows.filter(function (r) {
-    return String(r.values[athleteCol]).trim() === athlete.id && String(r.values[weaponCol]).trim() === String(weaponId);
-  });
   const link = { athleteId: athlete.id, weaponId: String(weaponId) };
+  const mine = links.rows.filter(function (r) { return isLinkRow_(links, r.values, link); });
   if (!mine.length) return { status: 'success', message: 'Это оружие уже не закреплено за вами', link: link };
 
   // Перед удалением строки перечитываются: если строки на листе сдвинулись (их вставили, удалили или отсортировали
@@ -777,8 +802,7 @@ function unassignWeapon_(user, weaponId) {
   const rows = mine.map(function (r) { return r.row; }).sort(function (a, b) { return b - a; });
   const current = links.sheet.getRange(rows[rows.length - 1], 1, rows[0] - rows[rows.length - 1] + 1, links.headers.length).getValues();
   rows.forEach(function (row) {
-    const values = current[row - rows[rows.length - 1]];
-    if (String(values[athleteCol]).trim() !== athlete.id || String(values[weaponCol]).trim() !== String(weaponId)) {
+    if (!isLinkRow_(links, current[row - rows[rows.length - 1]], link)) {
       throw userError_('Таблицу сейчас правят — попробуйте ещё раз через минуту');
     }
   });
@@ -787,11 +811,20 @@ function unassignWeapon_(user, weaponId) {
 
   const weapons = readTable_(ss, SHEET.weapons);
   const weapon = findById_(weapons, weaponId);
-  const title = weapon
-    ? String(weapons.get(weapon, WEAPON_COLUMN.title)).trim() + ' ' + String(weapons.get(weapon, WEAPON_COLUMN.number)).trim()
-    : String(weaponId);
+  const title = weapon ? weaponTitle_(weapons, weapon) : String(weaponId);
   log_(ss, 'Оружие откреплено', user, { athleteId: athlete.id, text: title });
   return { status: 'success', message: title + ' откреплено', link: link };
+}
+
+// «Название Номер» единицы оружия — для сообщений и журнала
+function weaponTitle_(weapons, weapon) {
+  return String(weapons.get(weapon, WEAPON_COLUMN.title)).trim() + ' ' + String(weapons.get(weapon, WEAPON_COLUMN.number)).trim();
+}
+
+// Строка листа «Спортсмен/Оружие» (values) — связь link { athleteId, weaponId }
+function isLinkRow_(links, values, link) {
+  return String(values[links.col(ATHLETE_WEAPON_COLUMN.athleteId)]).trim() === link.athleteId &&
+    String(values[links.col(ATHLETE_WEAPON_COLUMN.weaponId)]).trim() === link.weaponId;
 }
 
 // ---------- Настройки уведомлений ----------
@@ -802,9 +835,7 @@ function unassignWeapon_(user, weaponId) {
 function setNotifications_(user, input) {
   const ss = spreadsheet_();
   const table = athletesTable_(ss);
-  const athlete = findUser_(ss, table, user);
-  const denied = accessDenied_(athlete);
-  if (denied) throw userError_(denied.message);
+  const athlete = requireConfirmed_(ss, user, table);
   if (!athlete.isCarrier) throw userError_('Настройки уведомлений есть только у перевозчиков');
 
   const settings = [
@@ -830,8 +861,8 @@ function setNotifications_(user, input) {
 // ---------- Работа с листами ----------
 // Чтение листа — самая долгая часть вызова скрипта. Поэтому:
 //  - за один вызов каждый лист читается из таблицы не больше одного раза (sheetValuesMemo_);
-//  - для отдачи данных приложению (doGet) листы берутся из CacheService на SHEET_CACHE_SECONDS;
-//  - запись (doPost) всегда работает со свежими данными таблицы, не из кэша.
+//  - для отдачи данных приложению (loadSheets_) листы берутся из CacheService на SHEET_CACHE_SECONDS;
+//  - запись (действия doPost, кроме загрузки листов) всегда работает со свежими данными таблицы, не из кэша.
 //
 // Согласованность кэша с таблицей — через поколения. У каждого листа в кэше есть метка поколения
 // ('gen:<лист>'), копия листа хранится под ключом с этой меткой ('sheet:<лист>:<метка>').
@@ -840,12 +871,12 @@ function setNotifications_(user, input) {
 // если запись случилась во время чтения, устаревшая копия ляжет под уже ненужную метку и никому не попадётся.
 // Итог: загрузка, начатая после завершения записи, всегда видит эту запись. Правки другими скриптами
 // (например, перенос соревнований в архив) скрипт не замечает — они видны через SHEET_CACHE_SECONDS
-// или сразу по кнопке «Обновить» (fresh=1).
+// или сразу по кнопке «Обновить» (загрузка листов с fresh).
 
 // Значения листов, уже прочитанных в этом вызове скрипта (глобальные переменные живут один вызов)
 const sheetValuesMemo_ = {};
 
-// Принудительное обновление (GET с fresh=1 — кнопки «Обновить» и «Проверить снова» в приложении):
+// Принудительное обновление (загрузка листов с fresh — кнопки «Обновить» и «Проверить снова» в приложении):
 // таблица читается мимо кэша, а кэш заполняется свежими данными. Так правки в таблице видны сразу,
 // даже если триггер onSheetEdit не установлен
 let freshRead_ = false;
@@ -902,6 +933,11 @@ function sheetCache_() {
     result.generations[name] = generation;
   });
   if (Object.keys(missing).length) cache.putAll(missing, SHEET_GENERATION_SECONDS);
+  // При принудительном обновлении копии всё равно не используются — не забираем их
+  if (freshRead_) {
+    sheetCacheMemo_ = result;
+    return result;
+  }
 
   const copies = cache.getAll(APP_SHEETS.map(function (name) { return sheetKey_(name, result.generations[name]); }));
   APP_SHEETS.forEach(function (name) {
@@ -957,9 +993,8 @@ function invalidateSheets_(names) {
 }
 
 // Лист как таблица: заголовки, строки с непустым ID (первый столбец) и доступ к ячейкам по названию столбца
+// Сам лист (sheet) нужен только для записи — берётся из таблицы при первом обращении
 function readTable_(ss, name) {
-  const sheet = ss.getSheetByName(name);
-  if (!sheet) throw new Error('Нет листа «' + name + '»');
   const values = sheetValues_(ss, name, false);
   const headers = (values[0] || []).map(String);
   const rows = [];
@@ -971,8 +1006,12 @@ function readTable_(ss, name) {
     if (i === -1) throw new Error('Нет столбца «' + column + '» на листе «' + name + '»');
     return i;
   };
+  let sheet = null;
   return {
-    sheet: sheet,
+    get sheet() {
+      if (!sheet) sheet = ss.getSheetByName(name);
+      return sheet;
+    },
     headers: headers,
     rows: rows,
     col: col,
@@ -992,7 +1031,8 @@ function findById_(table, id) {
 // ---------- Чтение листов ----------
 
 function readSheets_(ss, names, athleteId) {
-  const wanted = names ? names.split(',').map(function (n) { return n.trim(); }) : APP_SHEETS;
+  // Список не задан или пуст — все листы приложения
+  const wanted = names && names.length ? names.map(function (n) { return String(n).trim(); }) : APP_SHEETS;
   const sheets = {};
 
   APP_SHEETS.forEach(function (name) {
@@ -1042,6 +1082,13 @@ function readSheets_(ss, names, athleteId) {
  */
 function verifySigned_(query) {
   if (!query) return {};
+  // Одна и та же строка проверяется за вызов один раз (например, initData — и при входе, и в ответе об отказе)
+  if (!verifiedMemo_.hasOwnProperty(query)) verifiedMemo_[query] = checkSignature_(query);
+  return verifiedMemo_[query];
+}
+const verifiedMemo_ = {};
+
+function checkSignature_(query) {
   const botToken = botToken_();
   if (!botToken) throw new Error('Не задано свойство скрипта BOT_TOKEN');
 
@@ -1080,6 +1127,14 @@ let botTokenMemo_;
 function botToken_() {
   if (botTokenMemo_ === undefined) botTokenMemo_ = (PropertiesService.getScriptProperties().getProperty('BOT_TOKEN') || '').trim();
   return botTokenMemo_;
+}
+
+// Адрес приложения из свойств скрипта (пусто — не задан) — читается один раз за вызов: при рассылке он нужен
+// для каждого сообщения
+let miniAppUrlMemo_;
+function miniAppUrl_() {
+  if (miniAppUrlMemo_ === undefined) miniAppUrlMemo_ = PropertiesService.getScriptProperties().getProperty('MINI_APP_URL') || '';
+  return miniAppUrlMemo_;
 }
 
 // Пользователь Telegram из initData или null
@@ -1133,7 +1188,8 @@ function verifiedPhone_(contactResponse, user) {
 // внизу редактора.
 //
 // Новое окружение (например, тестовое: копия таблицы + свой бот) настраивается так:
-//   1. «Настройки проекта» (⚙️) → «Свойства скрипта»: BOT_TOKEN и MINI_APP_URL (см. шапку файла);
+//   1. «Настройки проекта» (⚙️): часовой пояс — Europe/Moscow (по нему считаются даты соревнований и сроки
+//      перевозки); «Свойства скрипта»: BOT_TOKEN и MINI_APP_URL (см. шапку файла);
 //   2. installTriggers   — триггер onSheetEdit (или вручную в разделе «Триггеры»);
 //   3. setupMenuButton   — кнопка меню бота ведёт в приложение этого окружения;
 //   4. removeWebhook     — если checkSetup показывает вебхук (сообщения боту уходят старому коду);
@@ -1165,15 +1221,14 @@ function checkSetup() {
     lines.push('BOT_TOKEN: не задан');
   } else {
     lines.push('BOT_TOKEN: ' + rawToken.length + ' символов' + (rawToken !== rawToken.trim() ? ' — есть пробелы или переносы по краям (скрипт их отбрасывает)' : ''));
-    const response = UrlFetchApp.fetch('https://api.telegram.org/bot' + rawToken.trim() + '/getMe', { muteHttpExceptions: true });
-    const bot = JSON.parse(response.getContentText());
+    const callBot = function (method) {
+      return JSON.parse(UrlFetchApp.fetch('https://api.telegram.org/bot' + rawToken.trim() + '/' + method, { muteHttpExceptions: true }).getContentText());
+    };
+    const bot = callBot('getMe');
     lines.push(bot.ok ? 'Бот: @' + bot.result.username + ' (' + bot.result.first_name + ')' : 'Бот: токен не принят Telegram — ' + bot.description);
     if (bot.ok) {
       // Кто получает сообщения боту: наш скрипт сообщения не обрабатывает, поэтому вебхук должен быть пустым.
       // Если он задан — ответы в чате (клавиатуры, команды) даёт тот код, а не этот скрипт
-      const callBot = function (method) {
-        return JSON.parse(UrlFetchApp.fetch('https://api.telegram.org/bot' + rawToken.trim() + '/' + method, { muteHttpExceptions: true }).getContentText());
-      };
       const webhook = callBot('getWebhookInfo');
       if (webhook.ok) {
         lines.push('Вебхук: ' + (webhook.result.url || 'не задан') +
@@ -1211,8 +1266,7 @@ function checkSetup() {
  * У пользователей Telegram может показывать старую кнопку, пока чат с ботом не открыт заново.
  */
 function setupMenuButton() {
-  const props = PropertiesService.getScriptProperties();
-  const appUrl = props.getProperty('MINI_APP_URL');
+  const appUrl = miniAppUrl_();
   if (!appUrl) throw new Error('Не задано свойство скрипта MINI_APP_URL');
   const response = UrlFetchApp.fetch('https://api.telegram.org/bot' + botToken_() + '/setChatMenuButton', {
     method: 'post',
@@ -1438,8 +1492,7 @@ function competitionMessage_(competitions, row) {
 
 function notifyConfirmedAthletes_(ss, range) {
   const table = athletesTable_(ss);
-  const statusCol = readTable_(ss, SHEET.athletes).col(ATHLETE_COLUMN.status) + 1;
-  if (!columnInRange_(range, statusCol)) return;
+  if (!columnInRange_(range, table.col(ATHLETE_COLUMN.status) + 1)) return;
 
   const items = table.athletes.map(function (athlete) {
     return { id: athlete.id, row: athlete.row, status: athlete.status, athlete: athlete };
@@ -1540,7 +1593,7 @@ function sendTelegram_(chatId, text) {
 // по умолчанию «Открыть приложение» на стартовой странице
 function telegramRequestArgs_(chatId, text, button) {
   const message = { chat_id: chatId, text: text };
-  const appUrl = PropertiesService.getScriptProperties().getProperty('MINI_APP_URL');
+  const appUrl = miniAppUrl_();
   if (appUrl) {
     const params = (button && button.params) || {};
     const query = Object.keys(params).map(function (key) { return key + '=' + encodeURIComponent(params[key]); }).join('&');
@@ -1637,12 +1690,13 @@ function isUpcoming_(start) {
   return date >= new Date(now.getFullYear(), now.getMonth(), now.getDate());
 }
 
-// Дата из ячейки: ячейка с типом «дата» или текст «дд.мм.гггг» (полночь в часовом поясе скрипта); иначе null
+// Дата из ячейки: ячейка с типом «дата» или текст «дд.мм.гггг[ чч:мм[:сс]]» (в часовом поясе скрипта); иначе null.
+// Тот же формат разбирает приложение (toDate в src/data/model.js)
 function sheetDate_(value) {
   if (value instanceof Date) return value;
-  const m = String(value || '').trim().match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+  const m = String(value || '').trim().match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:[ ,T]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
   if (!m) return null;
-  const date = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+  const date = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]), Number(m[4] || 0), Number(m[5] || 0), Number(m[6] || 0));
   return date.getMonth() === Number(m[2]) - 1 ? date : null;
 }
 

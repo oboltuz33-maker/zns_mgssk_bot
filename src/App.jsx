@@ -33,10 +33,10 @@ const PAGES = [
 const START_PAGE = PAGES.find((p) => p.primary).id;
 const MENU = PAGES.filter((p) => p.menu);
 
-// Сообщение пользователю: в Telegram — его окном, вне Telegram — обычным alert
+// Сообщение пользователю: в Telegram — его окном (Bot API 6.2+), иначе — обычным alert
 const showMessage = (text) => {
   const tg = window.Telegram?.WebApp;
-  if (tg?.initData) tg.showAlert(text);
+  if (tg?.initData && tg.isVersionAtLeast?.('6.2')) tg.showAlert(text);
   else alert(text);
 };
 

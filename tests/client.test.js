@@ -82,6 +82,18 @@ describe('buildModel', () => {
     expect(model.competitions[2].start).toBeNull();
   });
 
+  it('датой считает только ISO-строку и дд.мм.гггг[ чч:мм] — как Apps Script', () => {
+    const source = data();
+    const rows = source.sheets['Соревнования'].rows;
+    rows[0]['Дата начала'] = '15.03.2099 10:00';
+    rows[1]['Дата начала'] = 'March 1, 2099';
+    rows[2]['Дата начала'] = '31.02.2099';
+    const byId = Object.fromEntries(buildModel(source).competitions.map((c) => [c.id, c]));
+    expect(byId.c2.start.toISOString()).toBe('2099-03-15T07:00:00.000Z');
+    expect(byId.c3.start).toBeNull();
+    expect(byId.c1.start).toBeNull();
+  });
+
   it('разбирает заявки: оружие по спортсменам, транспорт, новые сверху', () => {
     expect(model.applications.map((a) => a.number)).toEqual(['4', '3']);
     const application = model.applications[1];

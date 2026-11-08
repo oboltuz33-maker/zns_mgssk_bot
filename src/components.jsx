@@ -1,4 +1,5 @@
 // Общие элементы интерфейса страниц
+import { formatDateTime } from './helpers.js';
 
 // Кнопка «Показать ещё» для списка порциями (usePaged в helpers.js)
 export function ShowMore({ paged }) {
@@ -68,9 +69,7 @@ export function DataStatus({ sheets }) {
   const { savedAt, loading, error, refresh } = sheets;
   let text = 'Нет данных';
   if (loading) text = 'Загрузка таблицы…';
-  else if (savedAt) {
-    text = `Данные от ${new Date(savedAt).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
-  }
+  else if (savedAt) text = `Данные от ${formatDateTime(new Date(savedAt))}`;
 
   return (
     <>

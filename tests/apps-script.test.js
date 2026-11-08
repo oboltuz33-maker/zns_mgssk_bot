@@ -61,7 +61,7 @@ beforeEach(() => {
   gas = createGas(fixture());
 });
 
-const load = (user) => gas.get({ action: 'sheets', initData: initDataFor(user) });
+const load = (user, extra = {}) => gas.post({ action: 'sheets', initData: initDataFor(user), ...extra });
 const post = (user, action, payload = {}) => gas.post({ action, initData: initDataFor(user), ...payload });
 const newApplication = { competitionId: 'c1', items: [{ athleteId: 'a1', weaponIds: ['w1'] }, { athleteId: 'a2', weaponIds: ['w2'] }], transport: ['Автомобиль', 'Поезд'] };
 
@@ -74,19 +74,19 @@ describe('Проверка данных Telegram', () => {
 
   it('отклоняет подделанную подпись и называет бота', () => {
     const forged = initDataFor(IVANOV).replace(/hash=[0-9a-f]+/, 'hash=' + '0'.repeat(64));
-    const result = gas.get({ action: 'sheets', initData: forged });
+    const result = gas.post({ action: 'sheets', initData: forged });
     expect(result.status).toBe('forbidden');
     expect(result.message).toContain('@test_bot');
   });
 
   it('отклоняет данные, подписанные другим ботом', () => {
     const other = signTelegram({ user: JSON.stringify(IVANOV) }, '999:OTHER');
-    expect(gas.get({ action: 'sheets', initData: other }).status).toBe('forbidden');
+    expect(gas.post({ action: 'sheets', initData: other }).status).toBe('forbidden');
   });
 
   it('сообщает об устаревшей подписи', () => {
     const old = String(Math.floor(Date.now() / 1000) - 2 * 24 * 60 * 60);
-    const result = gas.get({ action: 'sheets', initData: initDataFor(IVANOV, { auth_date: old }) });
+    const result = gas.post({ action: 'sheets', initData: initDataFor(IVANOV, { auth_date: old }) });
     expect(result.status).toBe('expired');
   });
 
@@ -120,8 +120,33 @@ describe('Отдача листов приложению', () => {
   });
 
   it('не отдаёт листы вне списка приложения', () => {
-    const result = gas.get({ action: 'sheets', initData: initDataFor(IVANOV), names: 'Архив заявок,_Журнал,Оружие' });
+    const result = load(IVANOV, { names: ['Архив заявок', '_Журнал', 'Оружие'] });
     expect(Object.keys(result.sheets)).toEqual(['Оружие']);
+  });
+
+  it('пустой список листов — все листы приложения', () => {
+    expect(Object.keys(load(IVANOV, { names: [] }).sheets)).toHaveLength(6);
+  });
+
+  it('старые версии приложения загружают через GET', () => {
+    const result = gas.get({ action: 'sheets', initData: initDataFor(IVANOV), names: 'Оружие,Заявки', fresh: '1' });
+    expect(result.status).toBe('success');
+    expect(Object.keys(result.sheets)).toEqual(['Оружие', 'Заявки']);
+  });
+
+  it('fresh читает таблицу мимо кэша скрипта', () => {
+    load(IVANOV);
+    // Правка, о которой скрипт не узнал (например, сделанная другим скриптом), — в кэше старая копия
+    gas.sheet('Оружие').appendRow(['w9', 'Новое', '999']);
+    expect(load(IVANOV).sheets['Оружие'].rows).toHaveLength(2);
+    expect(load(IVANOV, { fresh: true }).sheets['Оружие'].rows).toHaveLength(3);
+  });
+
+  it('загрузка не запоминается по requestId — повтор отдаёт свежие данные', () => {
+    load(IVANOV, { requestId: 'same' });
+    post(IVANOV, 'assignWeapon', { weaponId: 'w2' });
+    const links = load(IVANOV, { requestId: 'same' }).sheets['Спортсмен/Оружие'].rows;
+    expect(links).toHaveLength(2);
   });
 
   it('видит запись через приложение сразу, несмотря на кэш', () => {
@@ -173,6 +198,13 @@ describe('Создание заявки', () => {
       expect(post(IVANOV, 'saveApplication', { application }).status).toBe('error');
     }
     expect(gas.sheet('Заявки').objects()).toHaveLength(3);
+  });
+
+  it('одна и та же единица оружия, переданная дважды, записывается один раз', () => {
+    const items = [{ athleteId: 'a1', weaponIds: ['w1', 'w1'] }];
+    post(IVANOV, 'saveApplication', { application: { ...newApplication, items } });
+    const row = gas.sheet('Заявки').objects().find((r) => r['№'] === 10);
+    expect(row['Оружие']).toBe('Иванов И.И. : МР-512 - 123');
   });
 
   it('повтор запроса с тем же requestId не создаёт вторую заявку', () => {
@@ -236,9 +268,12 @@ describe('Доступ по телефону и по ФИО', () => {
     expect(row['Статус']).toBe('Подтвержден');
   });
 
-  it('не принимает чужой номер', () => {
+  it('не принимает чужой номер — и не сбрасывает кэш листов, раз ничего не записано', () => {
     const user = { id: 444, first_name: 'Кузьма' };
+    load(IVANOV);
+    const generation = gas.cache.get('gen:Спортсмены');
     expect(post(user, 'linkPhone', { contact: contactFor(555, '79004444444') }).status).toBe('error');
+    expect(gas.cache.get('gen:Спортсмены')).toBe(generation);
   });
 
   it('номер, привязанный к другому аккаунту, — конфликт', () => {
@@ -341,6 +376,7 @@ describe('Утилиты', () => {
   it('sheetDate_ разбирает дд.мм.гггг и отбрасывает неверные даты', () => {
     const { sheetDate_ } = gas.run();
     expect(sheetDate_('05.03.2027')).toEqual(new Date(2027, 2, 5));
+    expect(sheetDate_('05.03.2027 10:30')).toEqual(new Date(2027, 2, 5, 10, 30));
     expect(sheetDate_('31.02.2027')).toBeNull();
     expect(sheetDate_('скоро')).toBeNull();
   });

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { isUpcomingCompetition, moscowDay } from '../data/model.js';
 import { applicationsForCompetition } from '../data/applications.js';
 import { Badge, EmptyState, PageHeader, SearchInput, ShowMore } from '../components.jsx';
-import { formatCompetitionDates, usePaged } from '../helpers.js';
+import { COMPETITION_CARD_HEIGHT, competitionSearchText, formatCompetitionDates, usePaged } from '../helpers.js';
 import { fuzzySearch } from '../data/search.js';
 
 // Номер дня по московскому календарю — чтобы считать «через сколько дней» без влияния часового пояса телефона
@@ -17,7 +17,7 @@ const untilText = (start) => {
 
 // onApply — кнопка «Подать заявку» (передаётся только перевозчикам).
 // existing — уже поданные заявки перевозчика на это соревнование: вместо «Подать заявку» показываются они
-export function CompetitionCard({ competition, onApply, existing = [], onOpenApplications }) {
+function CompetitionCard({ competition, onApply, existing = [], onOpenApplications }) {
   return (
     <div className="card item-card">
       <div className="item-title">{competition.title}</div>
@@ -59,9 +59,9 @@ export function CompetitionsPage({ model, me, onOpenPage }) {
 
   const upcoming = model.competitions.filter((c) => isUpcomingCompetition(c));
   // Поиск с опечатками, в другой раскладке и транслитом
-  const list = fuzzySearch(upcoming, query, (c) => [c.title, c.kind, c.address, c.ekpNumber].join(' '));
-  // Порциями по экрану (карточка ~170px); при новом запросе — снова с начала
-  const paged = usePaged(list, 170, query);
+  const list = fuzzySearch(upcoming, query, competitionSearchText);
+  // Порциями по экрану; при новом запросе — снова с начала
+  const paged = usePaged(list, COMPETITION_CARD_HEIGHT, query);
 
   return (
     <>

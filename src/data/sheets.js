@@ -86,20 +86,19 @@ export async function fetchSheets({ fresh = false } = {}) {
   // Окружение собрано без адреса скрипта (например, не заполнен .env.test)
   if (!GOOGLE_SCRIPT_URL) throw new Error('Не задан адрес Apps Script — VITE_GOOGLE_SCRIPT_URL в файле .env окружения');
 
-  const url = new URL(GOOGLE_SCRIPT_URL);
-  url.searchParams.set('action', 'sheets');
-  url.searchParams.set('initData', initData);
-  if (fresh) url.searchParams.set('fresh', '1');
-  if (SHEETS_PARAM) url.searchParams.set('names', SHEETS_PARAM);
-
-  // Адрес запроса всегда одинаковый — запрещаем браузеру отдавать сохранённый ответ вместо свежего
-  const response = await fetchWithRetry(url, { cache: 'no-store' });
+  // POST, а не GET: подписанные данные Telegram уходят в теле запроса и не попадают в адрес и журналы Google.
+  // Тело — text/plain, как в api.js: «простой» запрос без CORS preflight, который Apps Script не поддерживает.
+  // Ответ на POST браузер не кэширует. Чтение ничего не меняет — повтор при обрыве связи безопасен
+  const response = await fetchWithRetry(GOOGLE_SCRIPT_URL, {
+    method: 'POST',
+    body: JSON.stringify({ action: 'sheets', initData, names: SHEETS_TO_LOAD, fresh }),
+  });
   let json;
   try {
     json = await response.json();
   } catch {
-    // Вместо JSON пришла HTML-страница ошибки Google: нет doGet или веб-приложение закрыто
-    throw new Error('Apps Script не вернул данные — проверьте doGet и доступ к веб-приложению');
+    // Вместо JSON пришла HTML-страница ошибки Google: нет doPost или веб-приложение закрыто
+    throw new Error('Apps Script не вернул данные — проверьте doPost и доступ к веб-приложению');
   }
   const data = parseResponse(json);
   writeCache(data);

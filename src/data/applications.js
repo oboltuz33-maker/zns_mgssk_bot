@@ -187,7 +187,8 @@ export const weaponLines = (draft, model) =>
     return `${athlete?.shortName} : ${weapons.join(' ; ')}`;
   });
 
-// Отправка в Apps Script. Ответ: { status: 'success', number } или { status: 'error', message }.
+// Отправка в Apps Script. Ответ: { status: 'success', number, row } (row — сохранённая строка { заголовок: значение })
+// или { status: 'error', message }.
 // requestId — один на отправку одного и того же черновика: если ответ потерялся и пользователь нажал ещё раз,
 // скрипт вернёт прежний ответ, а не создаст вторую заявку
 export const saveApplication = (draft, requestId) =>

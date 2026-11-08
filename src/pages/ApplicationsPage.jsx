@@ -3,7 +3,7 @@ import { APPLICATION_STATUS, isUpcomingCompetition } from '../data/model.js';
 import { deleteApplication } from '../data/applications.js';
 import { withoutApplication } from '../data/patches.js';
 import { Badge, EmptyState, PageHeader, SearchInput, ShowMore } from '../components.jsx';
-import { confirmAction, formatDateTime, formatRange, usePaged } from '../helpers.js';
+import { APPLICATION_CARD_HEIGHT, confirmAction, formatDateTime, formatRange, usePaged } from '../helpers.js';
 import { fuzzySearch } from '../data/search.js';
 
 const STATUS_TONE = {
@@ -23,8 +23,8 @@ export function ApplicationsPage({ model, me, sheets, onOpenPage, onMessage }) {
   const list = fuzzySearch(mine, query, (a) =>
     [a.number, a.competitionTitle, a.ekpNumber, a.address, a.status, ...a.weaponLines, ...a.transportList].join(' '),
   );
-  // Порциями по экрану (карточка заявки ~280px)
-  const paged = usePaged(list, 280, query);
+  // Порциями по экрану
+  const paged = usePaged(list, APPLICATION_CARD_HEIGHT, query);
 
   const remove = async (application) => {
     const ok = await confirmAction(`Удалить заявку № ${application.number}? Она будет перенесена в архив.`);

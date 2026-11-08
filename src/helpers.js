@@ -7,6 +7,11 @@ import { useState } from 'react';
 
 const MIN_PAGE_SIZE = 3;
 
+// Примерная высота элементов списков, пикселей, — по ней считается, сколько помещается на экран
+export const ROW_HEIGHT = 64; // строка списка (спортсмен, оружие)
+export const COMPETITION_CARD_HEIGHT = 170;
+export const APPLICATION_CARD_HEIGHT = 280;
+
 // Сколько элементов примерно высотой itemHeight (в пикселях) помещается на экран устройства
 const pageSizeFor = (itemHeight) => Math.max(MIN_PAGE_SIZE, Math.ceil(window.innerHeight / itemHeight));
 
@@ -40,6 +45,9 @@ export const formatRange = (start, end) => {
 // Даты соревнования; если дата начала не указана или записана неверно — так и пишем
 export const formatCompetitionDates = (competition) =>
   competition?.start ? formatRange(competition.start, competition.end) : 'Дата не указана';
+
+// Текст соревнования для поиска: название, вид, адрес, № ЕКП
+export const competitionSearchText = (c) => [c.title, c.kind, c.address, c.ekpNumber].join(' ');
 
 // Подтверждение в стиле Telegram, вне Telegram — обычный confirm
 export const confirmAction = (text) =>

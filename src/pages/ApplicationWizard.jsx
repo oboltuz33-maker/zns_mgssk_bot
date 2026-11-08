@@ -18,13 +18,18 @@ import {
 import { withApplicationRow } from '../data/patches.js';
 import { newRequestId } from '../data/network.js';
 import { Badge, EmptyState, PageHeader, SearchInput, ShowMore } from '../components.jsx';
-import { confirmAction, formatCompetitionDates, formatDateTime, formatRange, usePaged } from '../helpers.js';
+import {
+  COMPETITION_CARD_HEIGHT,
+  ROW_HEIGHT,
+  competitionSearchText,
+  confirmAction,
+  formatCompetitionDates,
+  formatDateTime,
+  formatRange,
+  usePaged,
+} from '../helpers.js';
 import { fuzzySearch } from '../data/search.js';
 
-// Примерная высота карточки соревнования и строки списка — по ним считается, сколько помещается на экран
-// (дальше — кнопка «Показать ещё»)
-const CARD_HEIGHT = 170;
-const ROW_HEIGHT = 64;
 // Второе нажатие на ту же карточку в пределах этого времени — «двойное»: выбрать и перейти дальше
 const DOUBLE_TAP_MS = 400;
 
@@ -39,9 +44,14 @@ const hasMainButton = () => Boolean(tg()?.initData && tg().MainButton && tg().is
 //         { number } — изменение существующей заявки.
 export function ApplicationWizard({ model, me, params, sheets, onOpenPage, onCancel }) {
   const [initial] = useState(() => {
-    const application = params.number && model.applications.find((a) => a.number === String(params.number));
+    if (!params.number) return { draft: newDraft(model, me, params.competitionId), problems: [] };
+    const application = model.applications.find((a) => a.number === String(params.number));
     if (application) return draftFromApplication(model, application);
-    return { draft: newDraft(model, me, params.competitionId), problems: [] };
+    // Заявки уже нет в данных (например, её взяли в работу и перенесли в архив) — мастер откроется для новой
+    return {
+      draft: newDraft(model, me),
+      problems: [`Заявка № ${params.number} не найдена — возможно, её уже перенесли в архив. Можно подать новую`],
+    };
   });
   // Незаконченная новая заявка с прошлого раза — предлагаем продолжить
   const [resume, setResume] = useState(() => (params.number || !me ? null : loadSavedDraft(model, me)));
@@ -71,15 +81,16 @@ export function ApplicationWizard({ model, me, params, sheets, onOpenPage, onCan
     setDraft((d) => ({ ...d, ...changes }));
   };
 
+  // Новый шаг открывается без прошлых подсказок об ошибке
   const openStep = (index, fromReview = false) => {
     setStep(index);
     setReturnToReview(fromReview);
+    setAttempted(false);
   };
 
-  // Новый шаг открывается с начала страницы и без прошлых подсказок об ошибке
+  // Новый шаг (и экран «Заявка отправлена») открывается с начала страницы
   useEffect(() => {
     window.scrollTo(0, 0);
-    setAttempted(false);
   }, [step, result]);
 
   // Черновик новой заявки сохраняется на устройстве при каждом изменении
@@ -99,10 +110,8 @@ export function ApplicationWizard({ model, me, params, sheets, onOpenPage, onCan
       if (me && !draft.number) clearSavedDraft(me);
       tg()?.HapticFeedback?.notificationOccurred('success');
       setResult({ number: response.number, isEdit: Boolean(draft.number) });
-      // Сохранённая строка сразу появляется в «Моих заявках» — таблицу целиком не перекачиваем.
-      // Старая версия скрипта строку не возвращает — тогда перечитываем таблицу
-      if (response.row) sheets.patch((data) => withApplicationRow(data, response.row));
-      else sheets.refresh();
+      // Сохранённая строка сразу появляется в «Моих заявках» — таблицу целиком не перекачиваем
+      sheets.patch((data) => withApplicationRow(data, response.row));
     } catch (e) {
       console.error(e);
       setError(e.message || 'Ошибка сети');
@@ -324,8 +333,8 @@ function CompetitionStep({ draft, model, me, update, next }) {
   // Закреплённое — первым, дальше по датам; с запросом — лучшие совпадения
   const pinned = available.find((c) => c.id === pinnedId);
   const ordered = pinned ? [pinned, ...available.filter((c) => c !== pinned)] : available;
-  const list = fuzzySearch(ordered, query, (c) => [c.title, c.kind, c.address, c.ekpNumber].join(' '));
-  const paged = usePaged(list, CARD_HEIGHT, query);
+  const list = fuzzySearch(ordered, query, competitionSearchText);
+  const paged = usePaged(list, COMPETITION_CARD_HEIGHT, query);
   if (!available.length) return <EmptyState icon="🏆" title="Нет предстоящих соревнований" />;
 
   // Нажатие выбирает соревнование, повторное быстрое нажатие на него же — сразу дальше

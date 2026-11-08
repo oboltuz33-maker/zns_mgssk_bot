@@ -3,10 +3,7 @@ import { postAction } from '../data/api.js';
 import { withWeaponLink, withoutWeaponLink } from '../data/patches.js';
 import { fuzzySearch } from '../data/search.js';
 import { Chips, EmptyState, PageHeader, SearchInput, ShowMore } from '../components.jsx';
-import { confirmAction, usePaged } from '../helpers.js';
-
-// Примерная высота строки списка — по ней считается, сколько строк помещается на экран
-const ROW_HEIGHT = 64;
+import { ROW_HEIGHT, confirmAction, usePaged } from '../helpers.js';
 
 // Раздел «Оружие»: вкладка «Закреплённое» — своё оружие (можно открепить),
 // вкладка «Справочник» — общий справочник без своего, с поиском (можно закрепить за собой).
@@ -25,19 +22,14 @@ export function WeaponsPage({ model, me, sheets, onMessage }) {
 
   if (!me) return <EmptyState icon="🎯" title="Спортсмен не определён" />;
 
-  // Закрепить или открепить. Изменение применяется на месте — таблицу целиком не перекачиваем;
-  // старая версия скрипта изменение не возвращает — тогда перечитываем таблицу
+  // Закрепить или открепить. Изменение применяется на месте — таблицу целиком не перекачиваем
   const run = async (action, weapon) => {
     setBusyId(weapon.id);
     try {
       const result = await postAction(action, { weaponId: weapon.id });
       if (result.status !== 'success') throw new Error(result.message || 'Не удалось выполнить действие');
-      if (result.link) {
-        const apply = action === 'assignWeapon' ? withWeaponLink : withoutWeaponLink;
-        sheets.patch((data) => apply(data, result.link));
-      } else {
-        await sheets.refresh();
-      }
+      const apply = action === 'assignWeapon' ? withWeaponLink : withoutWeaponLink;
+      sheets.patch((data) => apply(data, result.link));
       onMessage(result.message);
     } catch (e) {
       console.error(e);

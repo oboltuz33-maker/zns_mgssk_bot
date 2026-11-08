@@ -7,34 +7,38 @@ const str = (value) => String(value ?? '').trim();
 
 // Все даты в таблице — московские. Ячейка с типом «дата» приходит от Apps Script ISO-строкой
 // (точный момент времени); текст «дд.мм.гггг[ чч:мм[:сс]]» считаем московским временем (UTC+3).
+// Другой текст датой не считается — как и в Apps Script (sheetDate_): иначе приложение показало бы
+// сроки перевозки, которые скрипт не запишет
 const RU_DATE = /^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:[ ,T]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}T/;
 const MOSCOW_UTC_OFFSET_HOURS = 3;
 
 const toDate = (value) => {
   if (!value) return null;
-  const m = str(value).match(RU_DATE);
-  const date = m
-    ? new Date(Date.UTC(+m[3], m[2] - 1, +m[1], (+m[4] || 0) - MOSCOW_UTC_OFFSET_HOURS, +m[5] || 0, +m[6] || 0))
-    : new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date;
+  const text = str(value);
+  const m = text.match(RU_DATE);
+  let date = null;
+  if (m) {
+    date = new Date(Date.UTC(+m[3], m[2] - 1, +m[1], (+m[4] || 0) - MOSCOW_UTC_OFFSET_HOURS, +m[5] || 0, +m[6] || 0));
+    // 31.02 и т.п. — не дата (Date переносит их на следующий месяц)
+    if (Number(moscowDay(date).slice(5, 7)) !== Number(m[2])) date = null;
+  } else if (ISO_DATE.test(text)) {
+    date = new Date(text);
+  }
+  return date && !Number.isNaN(date.getTime()) ? date : null;
 };
 
 // Календарный день по Москве в виде «гггг-мм-дд» — такие строки можно сравнивать между собой
 // и подставлять в <input type="date">
 export const moscowDay = (date) => date.toLocaleDateString('sv-SE', { timeZone: 'Europe/Moscow' });
 
-// Значения столбца «Статус» листа «Спортсмены» (как в Apps Script)
-export const ATHLETE_STATUS = {
-  confirmed: 'Подтвержден',
-};
-
-// Значения столбца «Статус» заявки (как в Apps Script). Автор может менять и удалять только «Новую»
+// Значения столбца «Статус» заявки (как в Apps Script). Автор может менять и удалять только «Новую».
+// «Удалена» в приложение не попадает: такие заявки лежат в «Архиве заявок», а его приложение не загружает
 export const APPLICATION_STATUS = {
   new: 'Новая',
   inProgress: 'В работе',
   done: 'Выполнена',
   archived: 'Архив',
-  deleted: 'Удалена',
 };
 
 // Виды транспорта в ячейке заявки — через «;» и перенос строки
@@ -63,7 +67,7 @@ const parseWeaponText = (value) =>
     });
 
 // «Иванов», «Иван», «Петрович» → «Иванов И.П.» (так спортсмен записывается в заявке)
-export const shortName = (lastName, firstName, middleName) => {
+const shortName = (lastName, firstName, middleName) => {
   const initials = [firstName, middleName].filter(Boolean).map((n) => n.charAt(0).toUpperCase() + '.').join('');
   return [lastName, initials].filter(Boolean).join(' ');
 };
@@ -74,7 +78,7 @@ const rowsOf = (data, sheetName) => data?.sheets?.[sheetName]?.rows ?? [];
 export const idColumn = (data, sheetName) => data?.sheets?.[sheetName]?.headers?.[0] ?? '';
 
 // Столбцы листа «Спортсмены» с настройками уведомлений перевозчика (ключ — как в запросе setNotifications)
-export const NOTIFY_COLUMN = {
+const NOTIFY_COLUMN = {
   competitions: 'Сообщать о соревнованиях',
   applications: 'Сообщать о заявках',
 };
