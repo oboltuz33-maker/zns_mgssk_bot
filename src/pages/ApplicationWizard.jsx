@@ -379,6 +379,8 @@ function CompetitionStep({ draft, model, me, update, next }) {
   );
 }
 
+const MIN_QUERY = 3; // поиск спортсменов — от стольких символов
+
 // Участники и их оружие на одном экране: каждый добавленный спортсмен — карточка с выбором оружия.
 // me — перевозчик, чьи прошлые заявки подсказывают участников (у администратора — автор заявки);
 // recentLabel — пометка у таких участников
@@ -400,13 +402,18 @@ export function ParticipantsStep({ draft, model, me, update, showErrors, recentL
     update({ items: draft.items.map((i) => (i.athleteId === athleteId ? { ...i, weaponIds } : i)) });
 
   const notSelected = (a) => !selectedIds.includes(a.id);
-  // Без запроса: сначала участники прошлых заявок, затем остальные по алфавиту; с запросом — лучшие совпадения
+  // Полный список не показываем: без запроса — только участники прошлых заявок,
+  // поиск по всем спортсменам — от MIN_QUERY символов (с опечатками по 1–2 буквам совпадает почти каждый)
   const recent = useMemo(() => recentAthletes(model, me), [model, me]).filter(notSelected);
-  const others = model.athletes
-    .filter((a) => notSelected(a) && !recent.includes(a))
-    .sort((a, b) => a.fullName.localeCompare(b.fullName, 'ru'));
-  const list = query.trim() ? fuzzySearch(model.athletes.filter(notSelected), query, (a) => a.fullName) : [...recent, ...others];
+  const trimmed = query.trim();
+  const searching = trimmed.length >= MIN_QUERY;
+  const list = searching ? fuzzySearch(model.athletes.filter(notSelected), trimmed, (a) => a.fullName) : trimmed ? [] : recent;
   const paged = usePaged(list, ROW_HEIGHT, query);
+  const hint = searching
+    ? 'Никого не нашли'
+    : trimmed
+      ? `Введите не меньше ${MIN_QUERY} букв`
+      : 'Начните вводить фамилию или имя';
 
   return (
     <>
@@ -427,7 +434,8 @@ export function ParticipantsStep({ draft, model, me, update, showErrors, recentL
 
       <h2 className="section-title">Добавить участника</h2>
       <SearchInput value={query} onChange={setQuery} placeholder="Фамилия, имя — можно с опечатками" />
-      {list.length === 0 && <p className="sheet-meta">{query.trim() ? 'Никого не нашли' : 'Все спортсмены уже в заявке'}</p>}
+      {list.length === 0 && <p className="sheet-meta">{hint}</p>}
+      {!trimmed && list.length > 0 && <p className="sheet-meta">Остальных спортсменов найдите поиском</p>}
       {list.length > 0 && (
         <div className="list">
           {paged.visible.map((a) => (
@@ -436,7 +444,7 @@ export function ParticipantsStep({ draft, model, me, update, showErrors, recentL
               <div className="list-text">
                 <div className="item-title">{a.fullName}</div>
                 <div className="item-hint">
-                  {!query.trim() && recent.includes(a) && `${recentLabel} · `}
+                  {!searching && `${recentLabel} · `}
                   {a.weapons.length ? `🎯 ${a.weapons.map((w) => w.title).join(', ')}` : 'Оружие не закреплено'}
                 </div>
               </div>
