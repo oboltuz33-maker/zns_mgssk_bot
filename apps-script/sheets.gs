@@ -19,8 +19,8 @@
  *      соревнования: за TRANSPORT_DAYS_BEFORE дней до начала и через TRANSPORT_DAYS_AFTER после окончания.
  *      Оружие — только закреплённое за спортсменом (при изменении — ещё и уже записанное у него в заявке).
  * POST { action: 'unassignWeapon', initData, weaponId }
- *      Открепить единицу от себя — строка удаляется из листа «Спортсмен/Оружие».
- *      Закрепляет оружие только администратор (adminAssignWeapon).
+ *      Администратор открепляет единицу от себя — строка удаляется из листа «Спортсмен/Оружие».
+ *      Закрепляет и открепляет оружие только администратор (adminAssignWeapon, adminUnassignWeapon).
  * POST { action: 'setNotifications', initData, notifications: { competitions?, applications? } }
  *      Настройки уведомлений перевозчика (true/false) — в его строке «Спортсменов».
  * POST { action: 'deleteApplication', initData, number }
@@ -920,11 +920,11 @@ function nextApplicationNumber_(ss, table) {
 
 // ---------- Закрепление оружия ----------
 
-// Спортсмен открепляет от себя единицу оружия: удаляются его строки с этой единицей в «Спортсмен/Оружие».
-// На уже поданные заявки не влияет — в них оружие записано текстом.
+// Администратор открепляет от себя единицу оружия (из раздела «Оружие»): удаляются его строки с этой единицей
+// в «Спортсмен/Оружие». Обычный спортсмен открепить не может. На уже поданные заявки не влияет — в них оружие текстом.
 function unassignWeapon_(user, weaponId) {
   const ss = spreadsheet_();
-  const athlete = requireConfirmed_(ss, user);
+  const athlete = requireAdmin_(ss, user);
   const result = unlinkWeapon_(ss, athlete.id, weaponId);
   if (result.already) return { status: 'success', message: 'Это оружие уже не закреплено за вами', link: result.link };
   log_(ss, 'Оружие откреплено', user, { athleteId: athlete.id, text: result.title });

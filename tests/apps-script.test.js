@@ -145,7 +145,7 @@ describe('Отдача листов приложению', () => {
 
   it('загрузка не запоминается по requestId — повтор отдаёт свежие данные', () => {
     load(IVANOV, { requestId: 'same' });
-    post(IVANOV, 'unassignWeapon', { weaponId: 'w1' });
+    post(PETROV, 'unassignWeapon', { weaponId: 'w2' });
     const links = load(IVANOV, { requestId: 'same' }).sheets['Спортсмен/Оружие'].rows;
     expect(links).toHaveLength(1);
   });
@@ -237,7 +237,7 @@ describe('Изменение и удаление заявки', () => {
   });
 
   it('оружие, уже записанное у спортсмена в заявке, можно оставить и без закрепления; новое — нет', () => {
-    post(IVANOV, 'unassignWeapon', { weaponId: 'w1' });
+    post(PETROV, 'adminUnassignWeapon', { athleteId: 'a1', weaponId: 'w1' });
     const kept = { ...edit, items: [{ athleteId: 'a1', weaponIds: ['w1'] }] };
     expect(post(IVANOV, 'saveApplication', { application: kept }).status).toBe('success');
     const added = { ...edit, items: [{ athleteId: 'a1', weaponIds: ['w1', 'w2'] }] };
@@ -320,8 +320,9 @@ describe('Доступ по телефону и по ФИО', () => {
 });
 
 describe('Закрепление оружия и настройки', () => {
-  it('закрепить за собой нельзя (только администратор), открепить от себя — можно', () => {
+  it('закрепить за собой нельзя; открепить от себя — только администратору', () => {
     expect(post(IVANOV, 'assignWeapon', { weaponId: 'w2' }).message).toContain('только администратор');
+    expect(post(IVANOV, 'unassignWeapon', { weaponId: 'w1' }).message).toContain('только администраторам');
     expect(gas.sheet('Спортсмен/Оружие').objects()).toHaveLength(2);
     expect(post(PETROV, 'unassignWeapon', { weaponId: 'w2' }).status).toBe('success');
     expect(gas.sheet('Спортсмен/Оружие').objects()).toEqual([{ 'Спортсмен ид': 'a1', 'Оружие ид': 'w1' }]);

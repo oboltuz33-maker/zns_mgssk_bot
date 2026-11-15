@@ -4,8 +4,8 @@ import { withoutWeaponLink } from '../data/patches.js';
 import { EmptyState, PageHeader, ShowMore } from '../components.jsx';
 import { ROW_HEIGHT, confirmAction, usePaged } from '../helpers.js';
 
-// Раздел «Оружие»: закреплённое за спортсменом оружие (можно открепить от себя). Закрепляет оружие только
-// администратор — в разделе «Админ». Список показывается порциями по экрану с кнопкой «Показать ещё»
+// Раздел «Оружие»: закреплённое за спортсменом оружие. Закрепляет и открепляет оружие только администратор
+// (в разделе «Админ»; своё — и здесь). Список показывается порциями по экрану с кнопкой «Показать ещё»
 export function WeaponsPage({ me, sheets, onMessage }) {
   const [busyId, setBusyId] = useState(null);
 
@@ -52,9 +52,11 @@ export function WeaponsPage({ me, sheets, onMessage }) {
                     {owners(w) && ` · также за: ${owners(w)}`}
                   </div>
                 </div>
-                <button className="secondary-button danger" onClick={() => unassign(w)} disabled={busyId !== null}>
-                  {busyId === w.id ? '…' : 'Открепить'}
-                </button>
+                {me.isAdmin && (
+                  <button className="secondary-button danger" onClick={() => unassign(w)} disabled={busyId !== null}>
+                    {busyId === w.id ? '…' : 'Открепить'}
+                  </button>
+                )}
               </div>
             ))}
           </div>
