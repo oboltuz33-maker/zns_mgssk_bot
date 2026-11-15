@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { isUpcomingCompetition, moscowDay } from '../data/model.js';
 import { applicationsForCompetition } from '../data/applications.js';
-import { Badge, EmptyState, PageHeader, SearchInput, ShowMore } from '../components.jsx';
-import { COMPETITION_CARD_HEIGHT, competitionSearchText, formatCompetitionDates, usePaged } from '../helpers.js';
+import { Badge, CardsOrTable, EmptyState, ListToolbar, PageHeader, SearchInput } from '../components.jsx';
+import { COMPETITION_CARD_HEIGHT, competitionSearchText, formatCompetitionDates, useListView } from '../helpers.js';
 import { fuzzySearch } from '../data/search.js';
+import { COMPETITION_COLUMNS } from '../listColumns.jsx';
 
 // Номер дня по московскому календарю — чтобы считать «через сколько дней» без влияния часового пояса телефона
 const dayNumber = (date) => Math.round(Date.parse(moscowDay(date)) / 86_400_000);
@@ -60,19 +61,28 @@ export function CompetitionsPage({ model, me, onOpenPage }) {
   const upcoming = model.competitions.filter((c) => isUpcomingCompetition(c));
   // Поиск с опечатками, в другой раскладке и транслитом
   const list = fuzzySearch(upcoming, query, competitionSearchText);
-  // Порциями по экрану; при новом запросе — снова с начала
-  const paged = usePaged(list, COMPETITION_CARD_HEIGHT, query);
+  // Лентой карточек (порциями по экрану) или таблицей — выбор запоминается на устройстве
+  const listView = useListView('competitions', COMPETITION_COLUMNS);
 
   return (
     <>
       <PageHeader title="Соревнования" subtitle={`Предстоящих: ${upcoming.length}`} />
-      {upcoming.length > 0 && <SearchInput value={query} onChange={setQuery} placeholder="Название, вид, адрес, № ЕКП" />}
+      {upcoming.length > 0 && (
+        <ListToolbar listView={listView}>
+          <SearchInput value={query} onChange={setQuery} placeholder="Название, вид, адрес, № ЕКП" />
+        </ListToolbar>
+      )}
 
       {list.length === 0 ? (
         <EmptyState icon="🏆" title={upcoming.length ? 'Ничего не найдено' : 'Нет предстоящих соревнований'} />
       ) : (
-        <>
-          {paged.visible.map((c) => (
+        <CardsOrTable
+          listView={listView}
+          items={list}
+          rowKey={(c) => c.id}
+          cardHeight={COMPETITION_CARD_HEIGHT}
+          resetKey={query}
+          renderCard={(c) => (
             <CompetitionCard
               key={c.id}
               competition={c}
@@ -80,9 +90,8 @@ export function CompetitionsPage({ model, me, onOpenPage }) {
               existing={applicationsForCompetition(model, c, me)}
               onOpenApplications={() => onOpenPage('applications')}
             />
-          ))}
-          <ShowMore paged={paged} />
-        </>
+          )}
+        />
       )}
     </>
   );

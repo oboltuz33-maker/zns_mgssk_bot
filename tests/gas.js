@@ -57,6 +57,7 @@ class FakeRange {
   getValue() { return this.getValues()[0][0]; }
   getFormulas() { return this.grid(this.sheet.formulas); }
   setValues(rows) {
+    if (this.row + rows.length - 1 > this.sheet.getMaxRows()) throw new Error('Диапазон за пределами листа');
     rows.forEach((row, i) => row.forEach((v, j) => storeCell(this.sheet, this.row - 1 + i, this.column - 1 + j, v)));
     return this;
   }
@@ -71,21 +72,37 @@ export class FakeSheet {
     this.name = name;
     this.values = [];
     this.formulas = [];
+    // Вызовы записи листа (appendRow, deleteRow, deleteRows) — проверки пакетной записи
+    this.calls = [];
+    this.maxRows = 1000;
     rows.forEach((row, r) => row.forEach((v, c) => storeCell(this, r, c, v)));
   }
   getName() { return this.name; }
   getLastRow() { return this.values.length; }
   getLastColumn() { return Math.max(0, ...this.values.map((r) => r.length)); }
+  // Сетка листа: maxRows строк (как у нового листа Google — 1000), insertRowsAfter её расширяет
+  getMaxRows() { return Math.max(this.maxRows, this.values.length); }
+  getMaxColumns() { return Math.max(26, this.getLastColumn()); }
+  insertRowsAfter(row, howMany) {
+    this.calls.push('insertRowsAfter');
+    this.maxRows = this.getMaxRows() + howMany;
+  }
   getRange(row, column, numRows = 1, numColumns = 1) { return new FakeRange(this, row, column, numRows, numColumns); }
   getDataRange() { return new FakeRange(this, 1, 1, Math.max(1, this.getLastRow()), Math.max(1, this.getLastColumn())); }
   appendRow(row) {
+    this.calls.push('appendRow');
     const r = this.values.length;
     row.forEach((v, c) => storeCell(this, r, c, v));
     return this;
   }
   deleteRow(row) {
-    this.values.splice(row - 1, 1);
-    this.formulas.splice(row - 1, 1);
+    this.deleteRows(row, 1);
+    this.calls[this.calls.length - 1] = 'deleteRow';
+  }
+  deleteRows(row, howMany) {
+    this.calls.push('deleteRows');
+    this.values.splice(row - 1, howMany);
+    this.formulas.splice(row - 1, howMany);
   }
   insertRowBefore(row) {
     this.values.splice(row - 1, 0, []);
@@ -103,6 +120,7 @@ class FakeSpreadsheet {
   constructor(sheets) { this.sheets = sheets; }
   getName() { return 'Тестовая таблица'; }
   getSheetByName(name) { return this.sheets.find((s) => s.name === name) ?? null; }
+  getSheets() { return this.sheets; }
   insertSheet(name) {
     const sheet = new FakeSheet(name);
     this.sheets.push(sheet);
@@ -149,11 +167,24 @@ export function createGas(sheets) {
   // Запросы к Telegram: { url, payload }
   const telegram = [];
   const response = (body) => ({ getResponseCode: () => 200, getContentText: () => JSON.stringify(body) });
+  // fetchError — запросы к Telegram падают с этой ошибкой (сбой сети)
+  const state = { fetchError: null };
   const fetch = (url, options = {}) => {
-    telegram.push({ url, payload: options.payload ? JSON.parse(options.payload) : null });
+    if (state.fetchError) throw new Error(state.fetchError);
+    // payload — JSON-строка (sendMessage) или объект с файлом (sendDocument, multipart)
+    const payload = typeof options.payload === 'string' ? JSON.parse(options.payload) : options.payload ?? null;
+    // scriptLocked — запрос ушёл, пока скрипт держал блокировку записи (doPost)
+    telegram.push({ url, payload, scriptLocked: scriptLock.held });
     return response(url.endsWith('/getMe') ? { ok: true, result: { username: 'test_bot' } } : { ok: true });
   };
-  const lock = { waitLock() {}, tryLock: () => true, releaseLock() {} };
+  const newLock = () => ({
+    held: false,
+    waitLock() { this.held = true; },
+    tryLock() { this.held = true; return true; },
+    releaseLock() { this.held = false; },
+  });
+  const scriptLock = newLock();
+  const documentLock = newLock();
 
   const services = {
     SpreadsheetApp: { getActiveSpreadsheet: () => spreadsheet, openById: () => spreadsheet, flush() {} },
@@ -167,11 +198,28 @@ export function createGas(sheets) {
         deleteProperty: props.remove,
       }),
     },
-    LockService: { getScriptLock: () => lock, getDocumentLock: () => lock },
+    LockService: { getScriptLock: () => scriptLock, getDocumentLock: () => documentLock },
     Utilities: {
-      newBlob: (value) => ({ getBytes: () => bytes(value) }),
+      newBlob: (value, contentType, name) => ({ getBytes: () => bytes(value), getDataAsString: () => value, getName: () => name }),
+      // Архив — список упакованных частей { имя: текст }: проверки читают части файла Excel
+      zip: (blobs, name) => ({
+        name,
+        files: Object.fromEntries(blobs.map((b) => [b.getName(), b.getDataAsString()])),
+        contentType: 'application/zip',
+        setContentType(type) {
+          this.contentType = type;
+          return this;
+        },
+        getName() {
+          return this.name;
+        },
+      }),
       computeHmacSha256Signature: (value, key) => [...hmac(Buffer.from(key), Buffer.from(value))],
-      formatDate: (date) => date.toLocaleDateString('ru-RU', { timeZone: 'Europe/Moscow' }),
+      // Поддерживаются форматы, которые использует скрипт: dd.MM.yyyy и yyyy-MM-dd
+      formatDate: (date, timeZone, format) =>
+        format === 'yyyy-MM-dd'
+          ? date.toLocaleDateString('sv-SE', { timeZone: 'Europe/Moscow' })
+          : date.toLocaleDateString('ru-RU', { timeZone: 'Europe/Moscow' }),
     },
     Session: { getScriptTimeZone: () => 'Europe/Moscow' },
     ContentService: { createTextOutput: (text) => ({ text, setMimeType() { return this; } }), MimeType: { JSON: 'json' } },
@@ -190,6 +238,7 @@ export function createGas(sheets) {
     cache,
     props,
     telegram,
+    failTelegram: (error) => void (state.fetchError = error),
     run,
     get: (params) => parse(run().doGet({ parameter: params })),
     post: (body) => parse(run().doPost({ postData: { contents: JSON.stringify(body) } })),

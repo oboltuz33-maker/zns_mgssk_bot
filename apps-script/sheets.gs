@@ -26,7 +26,31 @@
  * POST { action: 'deleteApplication', initData, number }
  *      Удаление: заявка переносится в «Архив заявок» со статусом «Удалена».
  *
+ *
+ * Администрирование — только подтверждённым спортсменам с «Да» в столбце «Администратор» (раздел «Администрирование»):
+ * POST { action: 'adminSetApplicationStatus', initData, number, status, from, reason? }
+ *      Смена статуса заявки по жизненному циклу (APPLICATION_TRANSITIONS); from — статус, который видел администратор.
+ *      «Отклонена» — с причиной (столбец «Причина отклонения»). Автору — сообщение бота.
+ * POST { action: 'adminSaveApplication', initData, application: { number, competitionId?, items, transport,
+ *      transportStart, transportEnd, address } }
+ *      Правка любой заявки: участники, оружие, транспорт, соревнование (если выбрано заново), сроки перевозки, адрес.
+ * POST { action: 'adminExportApplications', initData, from?, to? }
+ *      Выгрузка «Заявок» в .xlsx с отбором по срокам ЕКП («гггг-мм-дд») — бот присылает файл в чат.
+ * POST { action: 'adminSaveAthlete', initData, athleteId, fields: { столбец: значение } }
+ *      Правка спортсмена (кроме ID, телефона и ChatId), в том числе подтверждение (Статус = «Подтвержден»).
+ * POST { action: 'adminDeleteAthlete', initData, athleteId }
+ *      Удаление спортсмена: его закрепления удаляются, его заявки переносятся в «Архив заявок» с прежним статусом.
+ * POST { action: 'adminSaveCompetition', initData, competition: { id?, title, ekpNumber, kind, start, end, address } }
+ *      Создание (без id) или правка соревнования; рассылка перевозчикам — по тем же правилам, что у триггера.
+ * POST { action: 'adminSaveWeapon', initData, weapon: { id?, title, number } }
+ *      Создание или правка единицы справочника «Оружие»; пара «Название + Номер» уникальна.
+ * POST { action: 'adminDeleteWeapon', initData, weaponId } — удаление единицы вместе с её закреплениями.
+ * POST { action: 'adminAssignWeapon', initData, athleteId, weaponId? | newWeapon?: { title, number } }
+ *      Закрепить единицу за спортсменом; newWeapon — завести её в справочнике (если такой пары ещё нет) и закрепить.
+ * POST { action: 'adminUnassignWeapon', initData, athleteId, weaponId } — открепить.
+ *
  * Заявки создают, меняют и удаляют только подтверждённые перевозчики — только свои и только в статусе «Новая».
+ * Заявки прошедших соревнований раз в сутки переносятся в «Архив заявок» с прежним статусом (archivePastApplications).
  * Текст заявки (ФИО, оружие, данные соревнования) скрипт собирает сам по ID из справочников.
  *
  * Доступ:
@@ -35,10 +59,11 @@
  *  - листы из USER_SCOPED_SHEETS отдаются только со строками этого спортсмена;
  *  - в «Спортсменах» у чужих строк — только столбцы ATHLETE_PUBLIC_COLUMNS;
  *  - из «Соревнований» отдаются только предстоящие (дата начала — сегодня или позже; соревнования
- *    с неуказанной или неверной датой начала тоже отдаются, чтобы не потерялись).
+ *    с неуказанной или неверной датой начала тоже отдаются, чтобы не потерялись);
+ *  - администратору листы отдаются целиком, без этих ограничений.
  *
  * Уведомления: при ручной смене статуса спортсмена на «Подтвержден» и статуса заявки на «В работе» /
- * «Выполнена» бот пишет спортсмену, а о новом соревновании (заполнены название, даты и адрес) — всем
+ * «Выполнена» / «Отклонена» (а также при смене статуса заявки из приложения) бот пишет спортсмену, а о новом соревновании (заполнены название, даты и адрес) — всем
  * подтверждённым перевозчикам, один раз; отметка — в столбце «Рассылка» (триггер onSheetEdit; создаётся один раз
  * функцией installTriggers). Перевозчик может отключить в профиле рассылку о соревнованиях и сообщения о своих
  * заявках (столбцы ATHLETE_COLUMN.notifyCompetitions / notifyApplications).
@@ -101,6 +126,9 @@ const ATHLETE_COLUMN = {
   firstName: 'Имя',
   middleName: 'Отчество',
   carrier: 'Перевозчик',
+  // «Да» / «Нет»: «Да» — администратор (раздел «Администрирование» в приложении и полные данные, см. «Администрирование»).
+  // Пусто — как «Нет». Нет столбца — администраторов нет
+  admin: 'Администратор',
   // Настройки уведомлений перевозчика (меняет он сам в профиле приложения): «Нет» — не присылать;
   // пусто или «Да» — присылать. Нет столбца в листе — уведомления у всех включены, а в профиле настройки не видно
   notifyCompetitions: 'Сообщать о соревнованиях',
@@ -157,29 +185,64 @@ const APPLICATION_COLUMN = {
   ekpEnd: 'Сроки по ЕКП окончание',
   address: 'Адрес',
   status: 'Статус',
+  // Заполняет администратор при отклонении заявки (обязательно); очищается, когда отклонённую берут в работу
+  rejectReason: 'Причина отклонения',
   createdBy: 'CreatedBy',
   createdAt: 'CreatedAt',
 };
+
+// Служебные столбцы заявки — не попадают в выгрузку в Excel
+const APPLICATION_SERVICE_COLUMNS = [APPLICATION_COLUMN.createdBy, APPLICATION_COLUMN.createdAt];
 
 // Значения столбца «Статус» листа «Спортсмены»
 const ATHLETE_STATUS = {
   confirmed: 'Подтвержден',
   pending: 'Требует подтверждения',
   addedManually: 'Добавлен вручную',
+  // Работа запрещена (как и при любом статусе, кроме «Подтвержден»)
+  archived: 'Архив',
 };
+
+// Статусы спортсмена, которые администратор может поставить в приложении
+const ATHLETE_STATUSES = [ATHLETE_STATUS.confirmed, ATHLETE_STATUS.pending, ATHLETE_STATUS.addedManually, ATHLETE_STATUS.archived];
+
+// Столбцы «Спортсменов», которые администратор не меняет в приложении (кроме ID в первом столбце): телефон и ChatId
+// связывают запись с аккаунтом Telegram — их правят только в таблице
+const ATHLETE_LOCKED_COLUMNS = [ATHLETE_COLUMN.phone, ATHLETE_COLUMN.chatId];
+
+// Столбцы «Спортсменов» со значениями «Да» / «Нет»
+const ATHLETE_YES_NO_COLUMNS = [ATHLETE_COLUMN.carrier, ATHLETE_COLUMN.admin, ATHLETE_COLUMN.notifyCompetitions, ATHLETE_COLUMN.notifyApplications];
+
+// Предел длины текста в прочих столбцах, которые правит администратор
+const TEXT_MAX_LENGTH = 500;
 
 // Строки, внесённые администратором: привязка по телефону сразу подтверждает такого спортсмена.
 // Остальные статусы («Требует подтверждения», блокировки и т.п.) при привязке не меняются.
 const AUTO_CONFIRM_STATUSES = ['', ATHLETE_STATUS.addedManually];
 
 // Значения столбца «Статус» заявки. Автор может менять и удалять заявку только в статусе «Новая»;
-// остальные (и «Архив») ставит оформитель, «Удалена» — при удалении автором (заявка уходит в архив)
+// остальные ставит оформитель, «Удалена» — при удалении автором (заявка уходит в архив). Заявки прошедших
+// соревнований уходят в архив с прежним статусом (archivePastApplications)
 const APPLICATION_STATUS = {
   new: 'Новая',
   inProgress: 'В работе',
   done: 'Выполнена',
+  // Заявку нельзя выполнить; причина — в столбце «Причина отклонения»
+  rejected: 'Отклонена',
   deleted: 'Удалена',
 };
+
+// Смена статуса заявки администратором в приложении — только вперёд по жизненному циклу: из статуса → в какие можно.
+// Откатить назад можно только вручную в таблице
+const APPLICATION_TRANSITIONS = {
+  [APPLICATION_STATUS.new]: [APPLICATION_STATUS.inProgress, APPLICATION_STATUS.rejected],
+  [APPLICATION_STATUS.inProgress]: [APPLICATION_STATUS.done, APPLICATION_STATUS.rejected],
+  [APPLICATION_STATUS.rejected]: [APPLICATION_STATUS.inProgress],
+};
+
+const REJECT_REASON_MAX_LENGTH = 500;
+const ADDRESS_MAX_LENGTH = 300;
+const TITLE_MAX_LENGTH = 200;
 
 // Сроки перевозки: за сколько дней до начала соревнования и через сколько дней после окончания
 const TRANSPORT_DAYS_BEFORE = 1;
@@ -223,6 +286,15 @@ const WRITES_SHEETS = {
   assignWeapon: [SHEET.athleteWeapons],
   unassignWeapon: [SHEET.athleteWeapons],
   setNotifications: [SHEET.athletes],
+  adminSetApplicationStatus: [SHEET.applications],
+  adminSaveApplication: [SHEET.applications],
+  adminSaveAthlete: [SHEET.athletes],
+  adminDeleteAthlete: [SHEET.athletes, SHEET.athleteWeapons, SHEET.applications],
+  adminSaveCompetition: [SHEET.competitions],
+  adminSaveWeapon: [SHEET.weapons],
+  adminDeleteWeapon: [SHEET.weapons, SHEET.athleteWeapons],
+  adminAssignWeapon: [SHEET.weapons, SHEET.athleteWeapons],
+  adminUnassignWeapon: [SHEET.athleteWeapons],
 };
 
 // Ответы, с которыми действие ничего не записывает в листы (отказ в linkPhone и register; остальные действия при отказе
@@ -235,7 +307,7 @@ const ADMIN_CONTACT = '';
 
 
 // Статусы заявки, о смене на которые бот сообщает автору заявки
-const NOTIFY_APPLICATION_STATUSES = [APPLICATION_STATUS.inProgress, APPLICATION_STATUS.done];
+const NOTIFY_APPLICATION_STATUSES = [APPLICATION_STATUS.inProgress, APPLICATION_STATUS.done, APPLICATION_STATUS.rejected];
 
 // Листы, где первый столбец — ID строки и он ставится сам: строке, внесённой вручную, при правке выдаётся ID
 // (generateShortId). Не входят: «Заявки» (№ ставит скрипт), «Спортсмен/Оружие» (первый столбец — ID спортсмена),
@@ -276,27 +348,41 @@ function doPost(e) {
     if (!lock.tryLock(10000)) {
       return { status: 'error', message: 'Сервер занят другим запросом — попробуйте ещё раз через несколько секунд' };
     }
+    // Приложение повторяет запрос при обрыве связи. Если этот requestId уже выполнялся (запрос дошёл,
+    // а ответ потерялся) — возвращаем прежний ответ, а не выполняем действие второй раз
+    const cache = CacheService.getScriptCache();
+    const cacheKey = body.requestId ? 'request:' + user.id + ':' + body.requestId : null;
+    let result;
     try {
-      // Приложение повторяет запрос при обрыве связи. Если этот requestId уже выполнялся (запрос дошёл,
-      // а ответ потерялся) — возвращаем прежний ответ, а не выполняем действие второй раз
-      const cache = CacheService.getScriptCache();
-      const cacheKey = body.requestId ? 'request:' + user.id + ':' + body.requestId : null;
       const done = cacheKey && cache.get(cacheKey);
       if (done) return JSON.parse(done);
 
-      const result = runAction_(user, body);
+      result = runAction_(user, body);
       if (cacheKey) cache.put(cacheKey, JSON.stringify(result), REQUEST_CACHE_SECONDS);
       // Листы, в которые действие могло записать, — их кэш для чтения устарел. При отказе (NO_WRITE_STATUSES)
       // действие ничего не записало — кэш не трогаем
       if (WRITES_SHEETS[body.action] && NO_WRITE_STATUSES.indexOf(result.status) === -1) {
         invalidateSheets_(WRITES_SHEETS[body.action]);
       }
-      return result;
     } finally {
       lock.releaseLock();
     }
+
+    // Долгое продолжение действия (рассылка) — уже без блокировки: запись других пользователей его не ждёт.
+    // Ответ дополняется его итогом и заново запоминается под requestId
+    if (afterUnlock_) {
+      const after = afterUnlock_;
+      afterUnlock_ = null;
+      result = after(result);
+      if (cacheKey) cache.put(cacheKey, JSON.stringify(result), REQUEST_CACHE_SECONDS);
+    }
+    return result;
   });
 }
+
+// Продолжение действия doPost после снятия блокировки записи: function (result) → result. Действие задаёт его
+// последним шагом, когда всё под блокировкой уже записано. Глобальные переменные живут один вызов скрипта
+let afterUnlock_ = null;
 
 // Листы для приложения подтверждённому спортсмену. names — какие листы нужны (null — все из APP_SHEETS),
 // fresh — читать таблицу мимо кэша
@@ -306,7 +392,7 @@ function loadSheets_(user, names, fresh) {
   const athlete = findUser_(ss, athletesTable_(ss, true), user);
   const denied = accessDenied_(athlete);
   if (denied) return denied;
-  return readSheets_(ss, names, athlete.id);
+  return readSheets_(ss, names, athlete.id, athlete.isAdmin);
 }
 
 // Ошибки проверки (userError_) не кэшируются — при повторе запрос просто выполнится заново
@@ -318,6 +404,16 @@ function runAction_(user, body) {
   if (body.action === 'assignWeapon') return assignWeapon_(user, body.weaponId);
   if (body.action === 'unassignWeapon') return unassignWeapon_(user, body.weaponId);
   if (body.action === 'setNotifications') return setNotifications_(user, body.notifications || {});
+  if (body.action === 'adminSetApplicationStatus') return adminSetApplicationStatus_(user, body);
+  if (body.action === 'adminSaveApplication') return adminSaveApplication_(user, body.application || {});
+  if (body.action === 'adminExportApplications') return adminExportApplications_(user, body);
+  if (body.action === 'adminSaveAthlete') return adminSaveAthlete_(user, body);
+  if (body.action === 'adminDeleteAthlete') return adminDeleteAthlete_(user, body);
+  if (body.action === 'adminSaveCompetition') return adminSaveCompetition_(user, body.competition || {});
+  if (body.action === 'adminSaveWeapon') return adminSaveWeapon_(user, body.weapon || {});
+  if (body.action === 'adminDeleteWeapon') return adminDeleteWeapon_(user, body);
+  if (body.action === 'adminAssignWeapon') return adminAssignWeapon_(user, body);
+  if (body.action === 'adminUnassignWeapon') return adminUnassignWeapon_(user, body);
   return { status: 'error', message: 'Неизвестное действие: ' + body.action };
 }
 
@@ -325,6 +421,7 @@ function handle_(fn) {
   try {
     return json_(fn());
   } catch (err) {
+    if (!err.isUserError) logQuotaError_(err, 'Запрос приложения');
     // Ошибки проверки данных показываются пользователю как есть, остальные — с типом ошибки
     return json_({ status: 'error', message: err.isUserError ? err.message : String(err) });
   }
@@ -496,6 +593,7 @@ function athletesTable_(ss, fromCache) {
       status: cell(values[r], ATHLETE_COLUMN.status),
       phone: cell(values[r], ATHLETE_COLUMN.phone),
       isCarrier: cell(values[r], ATHLETE_COLUMN.carrier).toLowerCase() === 'да',
+      isAdmin: cell(values[r], ATHLETE_COLUMN.admin).toLowerCase() === 'да',
       // Уведомления включены, пока в столбце не «Нет» (и когда столбца нет)
       wantsCompetitions: cell(values[r], ATHLETE_COLUMN.notifyCompetitions).toLowerCase() !== 'нет',
       wantsApplications: cell(values[r], ATHLETE_COLUMN.notifyApplications).toLowerCase() !== 'нет',
@@ -579,27 +677,12 @@ function saveApplication_(user, input) {
   const author = requireCarrier_(ss, user);
   const fields = buildApplication_(ss, author, input);
   const table = readTable_(ss, SHEET.applications);
-  const rowObject = function (values) {
-    const result = {};
-    table.headers.forEach(function (h, i) { result[h] = values[i]; });
-    return result;
-  };
 
   if (input.number) {
     const fresh = freshOwnNewRow_(table, ownNewApplication_(table, input.number, author), input.number);
-    // Меняются только столбцы заявки; в остальных — то, что сейчас в таблице: формулы остаются формулами,
-    // правки оформителя не затираются
-    const values = fresh.values.slice();
-    const output = table.headers.map(function (h, i) {
-      if (fields.hasOwnProperty(h)) {
-        values[i] = fields[h];
-        return safeCell_(fields[h]);
-      }
-      return fresh.formulas[i] || safeCell_(fresh.values[i]);
-    });
-    fresh.range.setValues([output]);
+    const values = writeFields_(table, fresh, fields);
     log_(ss, 'Заявка изменена', user, { athleteId: author.id, text: '№ ' + input.number });
-    return { status: 'success', number: Number(input.number), row: rowObject(values) };
+    return { status: 'success', number: Number(input.number), row: rowObject_(table.headers, values) };
   }
 
   const number = nextApplicationNumber_(ss, table);
@@ -610,7 +693,30 @@ function saveApplication_(user, input) {
   const newValues = table.headers.map(function (h) { return fields.hasOwnProperty(h) ? fields[h] : ''; });
   table.sheet.appendRow(safeRow_(newValues));
   log_(ss, 'Заявка создана', user, { athleteId: author.id, text: '№ ' + number + ', ' + fields[APPLICATION_COLUMN.competitionTitle] });
-  return { status: 'success', number: number, row: rowObject(newValues) };
+  return { status: 'success', number: number, row: rowObject_(table.headers, newValues) };
+}
+
+// Строка { заголовок: значение } — для ответа приложению
+function rowObject_(headers, values) {
+  const result = {};
+  headers.forEach(function (h, i) { result[h] = values[i]; });
+  return result;
+}
+
+// Запись полей fields ({ заголовок: значение }) в перечитанную строку fresh (freshRow_). Меняются только эти столбцы;
+// в остальных — то, что сейчас в таблице: формулы остаются формулами, правки оформителя не затираются.
+// Возвращает новые значения строки
+function writeFields_(table, fresh, fields) {
+  const values = fresh.values.slice();
+  const output = table.headers.map(function (h, i) {
+    if (fields.hasOwnProperty(h)) {
+      values[i] = fields[h];
+      return safeCell_(fields[h]);
+    }
+    return fresh.formulas[i] || safeCell_(fresh.values[i]);
+  });
+  fresh.range.setValues([output]);
+  return values;
 }
 
 // Удаление автором: строка переносится в «Архив заявок» (столбцы сопоставляются по заголовкам)
@@ -669,24 +775,66 @@ function ownNewApplication_(table, number, author) {
 // в работу. Тогда действие не выполняется — повтор через минуту найдёт строку заново.
 // { range, values, formulas } — диапазон строки, её значения и формулы (пусто — в ячейке не формула)
 function freshOwnNewRow_(table, row, number) {
-  const range = table.sheet.getRange(row.row, 1, 1, table.headers.length);
-  const values = range.getValues()[0];
-  if (String(values[0]).trim() !== String(number).trim()) {
-    throw userError_('Таблицу заявок сейчас правят — попробуйте ещё раз через минуту');
-  }
-  const status = String(values[table.col(APPLICATION_COLUMN.status)]).trim();
+  const fresh = freshRow_(table, row, number);
+  const status = String(fresh.values[table.col(APPLICATION_COLUMN.status)]).trim();
   if (status !== APPLICATION_STATUS.new) {
     throw userError_('Заявка № ' + number + ' уже в статусе «' + status + '» — изменить или удалить её нельзя');
+  }
+  return fresh;
+}
+
+// Строка листа (row из readTable_ с ID id), перечитанная из таблицы прямо перед записью. Если на её месте уже другая
+// строка (строки вставили, удалили или отсортировали вручную) — ошибка, повтор через минуту найдёт строку заново.
+// { range, values, formulas } — диапазон строки, её значения и формулы (пусто — в ячейке не формула)
+function freshRow_(table, row, id) {
+  const range = table.sheet.getRange(row.row, 1, 1, table.headers.length);
+  const values = range.getValues()[0];
+  if (String(values[0]).trim() !== String(id).trim()) {
+    throw userError_('Таблицу «' + table.name + '» сейчас правят — попробуйте ещё раз через минуту');
   }
   return { range: range, values: values, formulas: range.getFormulas()[0] };
 }
 
-// Значения столбцов заявки (кроме №, статуса и автора) по выбору из приложения
+// Значения столбцов заявки (кроме №, статуса и автора) по выбору перевозчика в приложении
 function buildApplication_(ss, author, input) {
   const competitions = readTable_(ss, SHEET.competitions);
   const competition = findById_(competitions, input.competitionId);
   if (!competition) throw userError_('Соревнование не найдено — обновите данные и выберите заново');
+  if (!isUpcoming_(competitions.get(competition, COMPETITION_COLUMN.start))) {
+    throw userError_('Соревнование уже началось — заявку на него подать нельзя');
+  }
 
+  const fields = applicationContent_(ss, input);
+  const competitionFields = competitionFields_(competitions, competition);
+  Object.keys(competitionFields).forEach(function (column) { fields[column] = competitionFields[column]; });
+  fields[APPLICATION_COLUMN.fullName] = author.fullName;
+  return fields;
+}
+
+// Столбцы заявки из соревнования: вид, название, № ЕКП, сроки по ЕКП, адрес и сроки перевозки — от дат соревнования.
+// Если дата начала не указана или записана неверно, сроки перевозки остаются пустыми (их заполнит оформитель),
+// а в «Сроки по ЕКП» переносится то, что записано в ячейках
+function competitionFields_(competitions, competition) {
+  const rawStart = competitions.get(competition, COMPETITION_COLUMN.start);
+  const rawEnd = competitions.get(competition, COMPETITION_COLUMN.end);
+  const competitionStart = sheetDate_(rawStart);
+  const competitionEnd = sheetDate_(rawEnd) || competitionStart;
+
+  const fields = {};
+  fields[APPLICATION_COLUMN.transportStart] = competitionStart ? shiftDays_(competitionStart, -TRANSPORT_DAYS_BEFORE) : '';
+  fields[APPLICATION_COLUMN.transportEnd] = competitionEnd ? shiftDays_(competitionEnd, TRANSPORT_DAYS_AFTER) : '';
+  fields[APPLICATION_COLUMN.competitionKind] = competitions.get(competition, COMPETITION_COLUMN.kind);
+  fields[APPLICATION_COLUMN.competitionTitle] = competitions.get(competition, COMPETITION_COLUMN.title);
+  fields[APPLICATION_COLUMN.ekpNumber] = competitions.get(competition, COMPETITION_COLUMN.ekpNumber);
+  fields[APPLICATION_COLUMN.ekpStart] = competitionStart || rawStart;
+  fields[APPLICATION_COLUMN.ekpEnd] = sheetDate_(rawEnd) || rawEnd;
+  fields[APPLICATION_COLUMN.address] = competitions.get(competition, COMPETITION_COLUMN.address);
+  return fields;
+}
+
+// Столбцы «Оружие» и «Вид транспорта» по выбору из приложения: items — [{ athleteId, weaponIds }],
+// transport — названия из листа «Виды транспорта». Значениям из приложения доверяются только ID и выбор
+function applicationContent_(ss, input) {
   const athletes = athletesTable_(ss);
   const weapons = readTable_(ss, SHEET.weapons);
   const items = Array.isArray(input.items) ? input.items : [];
@@ -720,28 +868,9 @@ function buildApplication_(ss, author, input) {
     if (transportTypes.indexOf(name) === -1) throw userError_('Вид транспорта «' + name + '» не найден в справочнике');
   });
 
-  // Сроки перевозки — от дат соревнования. Если дата начала не указана или записана неверно,
-  // сроки остаются пустыми (их заполнит оформитель), а в «Сроки по ЕКП» переносится то, что записано в ячейках
-  const rawStart = competitions.get(competition, COMPETITION_COLUMN.start);
-  const rawEnd = competitions.get(competition, COMPETITION_COLUMN.end);
-  const competitionStart = sheetDate_(rawStart);
-  const competitionEnd = sheetDate_(rawEnd) || competitionStart;
-  if (!isUpcoming_(rawStart)) throw userError_('Соревнование уже началось — заявку на него подать нельзя');
-  const transportStart = competitionStart ? shiftDays_(competitionStart, -TRANSPORT_DAYS_BEFORE) : '';
-  const transportEnd = competitionEnd ? shiftDays_(competitionEnd, TRANSPORT_DAYS_AFTER) : '';
-
   const fields = {};
-  fields[APPLICATION_COLUMN.fullName] = author.fullName;
   fields[APPLICATION_COLUMN.weapon] = weaponLines.join('\n');
   fields[APPLICATION_COLUMN.transport] = transport.join(LIST_SEPARATOR);
-  fields[APPLICATION_COLUMN.transportStart] = transportStart;
-  fields[APPLICATION_COLUMN.transportEnd] = transportEnd;
-  fields[APPLICATION_COLUMN.competitionKind] = competitions.get(competition, COMPETITION_COLUMN.kind);
-  fields[APPLICATION_COLUMN.competitionTitle] = competitions.get(competition, COMPETITION_COLUMN.title);
-  fields[APPLICATION_COLUMN.ekpNumber] = competitions.get(competition, COMPETITION_COLUMN.ekpNumber);
-  fields[APPLICATION_COLUMN.ekpStart] = competitionStart || rawStart;
-  fields[APPLICATION_COLUMN.ekpEnd] = sheetDate_(rawEnd) || rawEnd;
-  fields[APPLICATION_COLUMN.address] = competitions.get(competition, COMPETITION_COLUMN.address);
   return fields;
 }
 
@@ -764,7 +893,26 @@ function nextApplicationNumber_(ss, table) {
 function assignWeapon_(user, weaponId) {
   const ss = spreadsheet_();
   const athlete = requireConfirmed_(ss, user);
+  const result = linkWeapon_(ss, athlete.id, weaponId);
+  if (result.already) return { status: 'success', message: result.title + ' уже закреплено за вами', link: result.link };
+  log_(ss, 'Оружие закреплено', user, { athleteId: athlete.id, text: result.title });
+  return { status: 'success', message: result.title + ' закреплено за вами', link: result.link };
+}
 
+// Спортсмен открепляет от себя единицу оружия: удаляются его строки с этой единицей в «Спортсмен/Оружие».
+// На уже поданные заявки не влияет — в них оружие записано текстом.
+function unassignWeapon_(user, weaponId) {
+  const ss = spreadsheet_();
+  const athlete = requireConfirmed_(ss, user);
+  const result = unlinkWeapon_(ss, athlete.id, weaponId);
+  if (result.already) return { status: 'success', message: 'Это оружие уже не закреплено за вами', link: result.link };
+  log_(ss, 'Оружие откреплено', user, { athleteId: athlete.id, text: result.title });
+  return { status: 'success', message: result.title + ' откреплено', link: result.link };
+}
+
+// Закрепление единицы оружия за спортсменом — строка в «Спортсмен/Оружие».
+// { link: { athleteId, weaponId }, title: «Название Номер», already: уже было закреплено }
+function linkWeapon_(ss, athleteId, weaponId) {
   const weapons = readTable_(ss, SHEET.weapons);
   const weapon = findById_(weapons, weaponId);
   if (!weapon) throw userError_('Оружие не найдено — обновите данные и выберите заново');
@@ -773,29 +921,26 @@ function assignWeapon_(user, weaponId) {
   const links = readTable_(ss, SHEET.athleteWeapons);
   // Нет нужного столбца — ошибка до записи, а не строка без ID спортсмена или оружия
   [ATHLETE_WEAPON_COLUMN.athleteId, ATHLETE_WEAPON_COLUMN.weaponId].forEach(function (column) { links.col(column); });
-  const link = { athleteId: athlete.id, weaponId: String(weaponId) };
-  const already =links.rows.some(function (r) { return isLinkRow_(links, r.values, link); });
-  if (already) return { status: 'success', message: title + ' уже закреплено за вами', link: link };
+  const link = { athleteId: String(athleteId), weaponId: String(weaponId) };
+  if (links.rows.some(function (r) { return isLinkRow_(links, r.values, link); })) return { link: link, title: title, already: true };
 
   links.sheet.appendRow(safeRow_(links.headers.map(function (h) {
-    if (h === ATHLETE_WEAPON_COLUMN.athleteId) return athlete.id;
-    if (h === ATHLETE_WEAPON_COLUMN.weaponId) return String(weaponId);
+    if (h === ATHLETE_WEAPON_COLUMN.athleteId) return link.athleteId;
+    if (h === ATHLETE_WEAPON_COLUMN.weaponId) return link.weaponId;
     return '';
   })));
-  log_(ss, 'Оружие закреплено', user, { athleteId: athlete.id, text: title });
-  return { status: 'success', message: title + ' закреплено за вами', link: link };
+  return { link: link, title: title, already: false };
 }
 
-// Спортсмен открепляет от себя единицу оружия: удаляются его строки с этой единицей в «Спортсмен/Оружие».
-// На уже поданные заявки не влияет — в них оружие записано текстом.
-function unassignWeapon_(user, weaponId) {
-  const ss = spreadsheet_();
-  const athlete = requireConfirmed_(ss, user);
-
+// Открепление: удаляются строки связи из «Спортсмен/Оружие». { link, title, already: и так не было закреплено }
+function unlinkWeapon_(ss, athleteId, weaponId) {
+  const link = { athleteId: String(athleteId), weaponId: String(weaponId) };
   const links = readTable_(ss, SHEET.athleteWeapons);
-  const link = { athleteId: athlete.id, weaponId: String(weaponId) };
   const mine = links.rows.filter(function (r) { return isLinkRow_(links, r.values, link); });
-  if (!mine.length) return { status: 'success', message: 'Это оружие уже не закреплено за вами', link: link };
+  const weapons = readTable_(ss, SHEET.weapons);
+  const weapon = findById_(weapons, weaponId);
+  const title = weapon ? weaponTitle_(weapons, weapon) : String(weaponId);
+  if (!mine.length) return { link: link, title: title, already: true };
 
   // Перед удалением строки перечитываются: если строки на листе сдвинулись (их вставили, удалили или отсортировали
   // вручную), по запомненным номерам уже другие связи — тогда ничего не удаляем
@@ -806,14 +951,8 @@ function unassignWeapon_(user, weaponId) {
       throw userError_('Таблицу сейчас правят — попробуйте ещё раз через минуту');
     }
   });
-  // Снизу вверх, чтобы номера ещё не удалённых строк не сдвигались
-  rows.forEach(function (row) { links.sheet.deleteRow(row); });
-
-  const weapons = readTable_(ss, SHEET.weapons);
-  const weapon = findById_(weapons, weaponId);
-  const title = weapon ? weaponTitle_(weapons, weapon) : String(weaponId);
-  log_(ss, 'Оружие откреплено', user, { athleteId: athlete.id, text: title });
-  return { status: 'success', message: title + ' откреплено', link: link };
+  deleteRowNumbers_(links.sheet, rows);
+  return { link: link, title: title, already: false };
 }
 
 // «Название Номер» единицы оружия — для сообщений и журнала
@@ -858,6 +997,614 @@ function setNotifications_(user, input) {
   return { status: 'success', athleteId: athlete.id, fields: saved };
 }
 
+// ---------- Администрирование ----------
+// Действия раздела «Администрирование» приложения. Доступны подтверждённым спортсменам с «Да» в столбце
+// «Администратор». Таблицу по-прежнему можно править вручную — здесь те же правки с проверкой ввода.
+
+// Подтверждённый спортсмен-администратор; иначе — ошибка
+function requireAdmin_(ss, user, table) {
+  const athlete = requireConfirmed_(ss, user, table);
+  if (!athlete.isAdmin) throw userError_('Это действие доступно только администраторам');
+  return athlete;
+}
+
+// Строка заявки по № для правки администратором, перечитанная из таблицы (freshRow_)
+function freshApplication_(table, number) {
+  const row = findById_(table, number);
+  if (!row) throw userError_('Заявка № ' + number + ' не найдена — возможно, её уже перенесли в архив');
+  return freshRow_(table, row, number);
+}
+
+// Смена статуса заявки: input — { number, status, from, reason }. from — статус, который видел администратор:
+// если в таблице уже другой (заявку тем временем изменили), ничего не меняем. Переходы — APPLICATION_TRANSITIONS.
+// «Отклонена» — только с причиной; при взятии отклонённой в работу причина очищается. Автору — сообщение бота
+function adminSetApplicationStatus_(user, input) {
+  const ss = spreadsheet_();
+  const admin = requireAdmin_(ss, user);
+  const number = String(input.number || '').trim();
+  const status = String(input.status || '').trim();
+  const table = readTable_(ss, SHEET.applications);
+  const fresh = freshApplication_(table, number);
+
+  const current = String(fresh.values[table.col(APPLICATION_COLUMN.status)]).trim();
+  if (input.from !== undefined && current !== String(input.from).trim()) {
+    throw userError_('Статус заявки № ' + number + ' уже изменён на «' + current + '» — обновите данные');
+  }
+  if ((APPLICATION_TRANSITIONS[current] || []).indexOf(status) === -1) {
+    throw userError_('Заявку № ' + number + ' в статусе «' + (current || 'без статуса') + '» нельзя перевести в «' + status + '»');
+  }
+
+  const fields = {};
+  fields[APPLICATION_COLUMN.status] = status;
+  const reason = String(input.reason || '').replace(/\s+/g, ' ').trim().slice(0, REJECT_REASON_MAX_LENGTH);
+  if (status === APPLICATION_STATUS.rejected || current === APPLICATION_STATUS.rejected) {
+    if (table.headers.indexOf(APPLICATION_COLUMN.rejectReason) === -1) {
+      throw userError_('Добавьте в лист «' + SHEET.applications + '» столбец «' + APPLICATION_COLUMN.rejectReason + '»');
+    }
+    if (status === APPLICATION_STATUS.rejected && !reason) throw userError_('Укажите причину отклонения');
+    fields[APPLICATION_COLUMN.rejectReason] = status === APPLICATION_STATUS.rejected ? reason : '';
+  }
+
+  const values = writeFields_(table, fresh, fields);
+  log_(ss, 'Статус заявки', user, {
+    athleteId: admin.id,
+    text: '№ ' + number + ': «' + current + '» → «' + status + '»' + (reason && status === APPLICATION_STATUS.rejected ? '. Причина: ' + reason : ''),
+  });
+  // Запись — в таблице до отправки сообщения: при ошибке Telegram статус всё равно сменён
+  SpreadsheetApp.flush();
+  notifyApplicationStatusNow_(ss, table.headers, values);
+  return { status: 'success', number: Number(number), row: rowObject_(table.headers, values) };
+}
+
+// Правка заявки администратором: input — { number, competitionId?, items, transport, transportStart, transportEnd, address }.
+// Участники, оружие и транспорт — по ID и названиям, как в мастере. competitionId — соревнование выбрано заново: его вид,
+// название, № ЕКП и сроки по ЕКП переписываются из листа «Соревнования» (и прошедшего — это исправление ошибок);
+// без него эти столбцы не меняются. Сроки перевозки (дата «гггг-мм-дд» или пусто) и адрес — как указал администратор.
+// ФИО (автор), статус и автор не меняются
+function adminSaveApplication_(user, input) {
+  const ss = spreadsheet_();
+  const admin = requireAdmin_(ss, user);
+  const number = String(input.number || '').trim();
+  const table = readTable_(ss, SHEET.applications);
+  if (!findById_(table, number)) throw userError_('Заявка № ' + number + ' не найдена — возможно, её уже перенесли в архив');
+
+  const fields = applicationContent_(ss, input);
+  if (input.competitionId) {
+    const competitions = readTable_(ss, SHEET.competitions);
+    const competition = findById_(competitions, input.competitionId);
+    if (!competition) throw userError_('Соревнование не найдено — обновите данные и выберите заново');
+    const competitionFields = competitionFields_(competitions, competition);
+    [APPLICATION_COLUMN.competitionKind, APPLICATION_COLUMN.competitionTitle, APPLICATION_COLUMN.ekpNumber,
+      APPLICATION_COLUMN.ekpStart, APPLICATION_COLUMN.ekpEnd].forEach(function (column) { fields[column] = competitionFields[column]; });
+  }
+  const transportStart = inputDate_(input.transportStart, 'Начало перевозки');
+  const transportEnd = inputDate_(input.transportEnd, 'Окончание перевозки');
+  if (transportStart && transportEnd && transportStart > transportEnd) throw userError_('Окончание перевозки раньше начала');
+  fields[APPLICATION_COLUMN.transportStart] = transportStart;
+  fields[APPLICATION_COLUMN.transportEnd] = transportEnd;
+  fields[APPLICATION_COLUMN.address] = String(input.address || '').replace(/\s+/g, ' ').trim().slice(0, ADDRESS_MAX_LENGTH);
+
+  // Строка перечитывается после всех проверок — прямо перед записью
+  const values = writeFields_(table, freshApplication_(table, number), fields);
+  log_(ss, 'Заявка изменена администратором', user, { athleteId: admin.id, text: '№ ' + number });
+  return { status: 'success', number: Number(number), row: rowObject_(table.headers, values) };
+}
+
+// Дата из приложения: «гггг-мм-дд» (поле выбора даты) → полночь в часовом поясе скрипта; пусто → ''
+function inputDate_(value, label) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const m = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const date = m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+  if (!date || date.getMonth() !== Number(m[2]) - 1) throw userError_(label + ': неверная дата «' + text + '»');
+  return date;
+}
+
+// Выгрузка листа «Заявки» в Excel: input — { from, to } («гггг-мм-дд», любая может быть пустой). Отбор — по срокам ЕКП:
+// в файл попадают заявки, у которых сроки по ЕКП пересекаются с периодом (без периода — все). Заявки без даты по ЕКП
+// при заданном периоде не попадают — их число сообщается. Столбцы — как в таблице, без служебных
+// (APPLICATION_SERVICE_COLUMNS). Файл .xlsx бот присылает администратору в чат
+function adminExportApplications_(user, input) {
+  const ss = spreadsheet_();
+  const admin = requireAdmin_(ss, user);
+  const from = inputDate_(input.from, 'Начало периода');
+  const to = inputDate_(input.to, 'Конец периода');
+  if (from && to && from > to) throw userError_('Конец периода раньше начала');
+
+  const table = readTable_(ss, SHEET.applications);
+  const columns = [];
+  table.headers.forEach(function (h, i) {
+    if (h.trim() && APPLICATION_SERVICE_COLUMNS.indexOf(h) === -1) columns.push(i);
+  });
+
+  let withoutDate = 0;
+  const selected = [];
+  table.rows.forEach(function (row) {
+    const start = sheetDate_(table.get(row, APPLICATION_COLUMN.ekpStart));
+    const end = sheetDate_(table.get(row, APPLICATION_COLUMN.ekpEnd)) || start;
+    if (from || to) {
+      if (!start) {
+        withoutDate++;
+        return;
+      }
+      // Конец периода — включительно (до конца дня)
+      if (to && start >= shiftDays_(to, 1)) return;
+      if (from && end < from) return;
+    }
+    selected.push({ start: start, number: Number(row.values[0]) || 0, values: row.values });
+  });
+  if (!selected.length) {
+    return { status: 'success', count: 0, message: 'За этот период заявок нет' + (withoutDate ? ' (без даты по ЕКП: ' + withoutDate + ')' : '') };
+  }
+  // По датам ЕКП, затем по №; без даты — в конце
+  selected.sort(function (a, b) {
+    return (a.start ? a.start.getTime() : Infinity) - (b.start ? b.start.getTime() : Infinity) || a.number - b.number;
+  });
+
+  const day = function (date) { return Utilities.formatDate(date, Session.getScriptTimeZone(), 'yyyy-MM-dd'); };
+  const period = from || to ? (from ? day(from) : '…') + '_' + (to ? day(to) : '…') : 'all';
+  const periodText = from || to
+    ? 'по срокам ЕКП ' + (from ? 'с ' + Utilities.formatDate(from, Session.getScriptTimeZone(), 'dd.MM.yyyy') : '') +
+      (to ? ' по ' + Utilities.formatDate(to, Session.getScriptTimeZone(), 'dd.MM.yyyy') : '')
+    : 'все';
+  // Даты, записанные в ячейки текстом «дд.мм.гггг», — в файле тоже датами
+  const dateColumns = [APPLICATION_COLUMN.transportStart, APPLICATION_COLUMN.transportEnd, APPLICATION_COLUMN.ekpStart, APPLICATION_COLUMN.ekpEnd];
+  const rows = [columns.map(function (i) { return table.headers[i]; })].concat(selected.map(function (item) {
+    return columns.map(function (i) {
+      const value = item.values[i];
+      return dateColumns.indexOf(table.headers[i]) === -1 ? value : sheetDate_(value) || value;
+    });
+  }));
+  const file = xlsxBlob_(SHEET.applications, rows, 'zayavki_' + period + '.xlsx');
+
+  const caption = 'Заявки (' + periodText + '): ' + selected.length +
+    (withoutDate ? '. Без даты по ЕКП не вошли: ' + withoutDate : '');
+  const error = telegramError_(fetch_('https://api.telegram.org/bot' + botToken_() + '/sendDocument', {
+    method: 'post',
+    muteHttpExceptions: true,
+    payload: { chat_id: String(user.id), caption: caption, document: file },
+  }));
+  log_(ss, 'Выгрузка заявок', user, { athleteId: admin.id, text: caption + (error ? '. Не отправлено: ' + error : '') });
+  if (error) {
+    throw userError_('Бот не смог прислать файл (' + error + '). Откройте чат с ботом, нажмите «Старт» и повторите выгрузку');
+  }
+  return { status: 'success', count: selected.length, message: 'Файл отправлен в чат с ботом. ' + caption };
+}
+
+// ---------- Администрирование: спортсмены ----------
+
+// Правка спортсмена: input — { athleteId, fields: { столбец: значение } } (только изменённые столбцы).
+// Менять можно все столбцы, кроме ID, телефона и ChatId (ATHLETE_LOCKED_COLUMNS). Статус — из ATHLETE_STATUSES,
+// «Перевозчик», «Администратор» и настройки уведомлений — «Да» / «Нет», ФИО — без дублей (как при заявке на доступ),
+// ячейка-дата — датой («гггг-мм-дд»), прочее — текстом. Себе нельзя снять признак администратора и сменить статус —
+// иначе пропадёт доступ. Статус сменили на «Подтвержден» — спортсмену сообщение бота, как при ручной правке
+function adminSaveAthlete_(user, input) {
+  const ss = spreadsheet_();
+  const athletes = athletesTable_(ss);
+  const admin = requireAdmin_(ss, user, athletes);
+  const id = String(input.athleteId || '').trim();
+  const athlete = findAthlete_(athletes, function (a) { return a.id === id; });
+  if (!athlete) throw userError_('Спортсмен не найден — обновите данные');
+
+  const table = readTable_(ss, SHEET.athletes);
+  const fresh = freshRow_(table, findById_(table, id), id);
+  const changes = input.fields || {};
+  const fields = {};
+  Object.keys(changes).forEach(function (column) {
+    const i = table.headers.indexOf(column);
+    if (i === -1) throw userError_('Нет столбца «' + column + '» на листе «' + SHEET.athletes + '»');
+    if (i === 0 || ATHLETE_LOCKED_COLUMNS.indexOf(column) !== -1) throw userError_('Столбец «' + column + '» меняется только в таблице');
+    const raw = changes[column];
+    if (column === ATHLETE_COLUMN.status) {
+      const status = String(raw || '').trim();
+      if (ATHLETE_STATUSES.indexOf(status) === -1) throw userError_('Неизвестный статус «' + status + '»');
+      fields[column] = status;
+    } else if (ATHLETE_YES_NO_COLUMNS.indexOf(column) !== -1) {
+      const value = String(raw || '').trim();
+      if (value !== 'Да' && value !== 'Нет') throw userError_('«' + column + '»: допустимо «Да» или «Нет»');
+      fields[column] = value;
+    } else if ([ATHLETE_COLUMN.lastName, ATHLETE_COLUMN.firstName, ATHLETE_COLUMN.middleName].indexOf(column) !== -1) {
+      fields[column] = cleanName_(raw);
+    } else if (fresh.values[i] instanceof Date) {
+      fields[column] = inputDate_(raw, column);
+    } else {
+      fields[column] = String(raw === null || raw === undefined ? '' : raw).replace(/\r\n?/g, '\n').trim().slice(0, TEXT_MAX_LENGTH);
+    }
+  });
+  if (!Object.keys(fields).length) throw userError_('Нечего сохранять');
+
+  const name = function (column, current) { return fields.hasOwnProperty(column) ? fields[column] : current; };
+  const lastName = name(ATHLETE_COLUMN.lastName, athlete.lastName);
+  const firstName = name(ATHLETE_COLUMN.firstName, athlete.firstName);
+  const middleName = name(ATHLETE_COLUMN.middleName, athlete.middleName);
+  if (!lastName || !firstName) throw userError_('Укажите фамилию и имя');
+  const namesake = findAthlete_(athletes, function (a) { return a.id !== id && sameName_(a, lastName, firstName, middleName); });
+  if (namesake) throw userError_('Спортсмен ' + namesake.fullName + ' уже есть в списке — дубли недопустимы');
+
+  if (id === admin.id) {
+    if (fields[ATHLETE_COLUMN.admin] === 'Нет') throw userError_('Снять признак администратора с себя нельзя');
+    if (fields.hasOwnProperty(ATHLETE_COLUMN.status) && fields[ATHLETE_COLUMN.status] !== ATHLETE_STATUS.confirmed) {
+      throw userError_('Свой статус сменить нельзя — пропадёт доступ к приложению');
+    }
+  }
+
+  const values = writeFields_(table, fresh, fields);
+  log_(ss, 'Спортсмен изменён', user, {
+    athleteId: id,
+    text: [lastName, firstName, middleName].filter(Boolean).join(' ') + ': ' + Object.keys(fields).map(function (column) {
+      const value = fields[column];
+      return column + ' = ' + (value instanceof Date ? Utilities.formatDate(value, Session.getScriptTimeZone(), 'dd.MM.yyyy') : '«' + value + '»');
+    }).join('; ') + '. Изменил: ' + admin.fullName,
+  });
+
+  if (fields.hasOwnProperty(ATHLETE_COLUMN.status) &&
+    notifyStatusNow_(SHEET.athletes, id, fields[ATHLETE_COLUMN.status], [ATHLETE_STATUS.confirmed])) {
+    SpreadsheetApp.flush();
+    forgetSheet_(SHEET.athletes);
+    sendAccessConfirmed_(ss, findAthlete_(athletesTable_(ss), function (a) { return a.id === id; }));
+  }
+  return { status: 'success', athleteId: id, row: rowObject_(table.headers, values) };
+}
+
+// Удаление спортсмена: его закрепления оружия удаляются, его заявки (CreatedBy) переносятся в «Архив заявок»
+// с прежним статусом, строка удаляется из «Спортсменов». Заявки других перевозчиков, где он участник, не меняются —
+// там он записан текстом. Себя удалить нельзя
+function adminDeleteAthlete_(user, input) {
+  const ss = spreadsheet_();
+  const athletes = athletesTable_(ss);
+  const admin = requireAdmin_(ss, user, athletes);
+  const id = String(input.athleteId || '').trim();
+  const athlete = findAthlete_(athletes, function (a) { return a.id === id; });
+  if (!athlete) throw userError_('Спортсмен не найден — обновите данные');
+  if (id === admin.id) throw userError_('Удалить себя нельзя');
+
+  const archive = readTable_(ss, SHEET.applicationsArchive);
+  const moved = deleteRowsWhere_(ss, SHEET.applications, function (values, headers) {
+    return String(values[headers.indexOf(APPLICATION_COLUMN.createdBy)]).trim() === id;
+  }, function (rows, headers) {
+    // Сначала копии в архив (одной записью), потом удаление — чтобы заявки не потерялись при ошибке
+    appendRows_(archive.sheet, rows.map(function (values) {
+      return archive.headers.map(function (h) {
+        const i = headers.indexOf(h);
+        return i === -1 ? '' : values[i];
+      });
+    }));
+  });
+  const links = deleteRowsWhere_(ss, SHEET.athleteWeapons, function (values, headers) {
+    return String(values[headers.indexOf(ATHLETE_WEAPON_COLUMN.athleteId)]).trim() === id;
+  });
+  deleteRowsWhere_(ss, SHEET.athletes, function (values) { return String(values[0]).trim() === id; });
+
+  const numbers = moved.map(function (values) { return String(values[0]).trim(); });
+  log_(ss, 'Спортсмен удалён', user, {
+    athleteId: id,
+    phone: athlete.phone,
+    text: athlete.fullName + '. Откреплено оружия: ' + links.length +
+      (numbers.length ? '; заявки перенесены в «' + SHEET.applicationsArchive + '»: № ' + numbers.join(', ') : '') + '. Удалил: ' + admin.fullName,
+  });
+  return { status: 'success', athleteId: id, applications: numbers, links: links.length };
+}
+
+// ---------- Администрирование: соревнования ----------
+
+// Создание (без id) или правка соревнования: input — { id?, title, ekpNumber, kind, start, end, address }, даты —
+// «гггг-мм-дд» или пусто. Поданные заявки не меняются (в них данные соревнования записаны текстом).
+// После сохранения — рассылка перевозчикам по тем же правилам, что у триггера (NEW_COMPETITION_REQUIRED и «Рассылка»)
+function adminSaveCompetition_(user, input) {
+  const ss = spreadsheet_();
+  const admin = requireAdmin_(ss, user);
+  const table = readTable_(ss, SHEET.competitions);
+  const text = function (value, max) { return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max); };
+
+  const fields = {};
+  fields[COMPETITION_COLUMN.title] = text(input.title, TITLE_MAX_LENGTH);
+  if (!fields[COMPETITION_COLUMN.title]) throw userError_('Укажите название соревнования');
+  fields[COMPETITION_COLUMN.ekpNumber] = text(input.ekpNumber, NAME_MAX_LENGTH);
+  fields[COMPETITION_COLUMN.kind] = text(input.kind, TITLE_MAX_LENGTH);
+  fields[COMPETITION_COLUMN.address] = text(input.address, ADDRESS_MAX_LENGTH);
+  fields[COMPETITION_COLUMN.start] = inputDate_(input.start, 'Дата начала');
+  fields[COMPETITION_COLUMN.end] = inputDate_(input.end, 'Дата завершения');
+  if (fields[COMPETITION_COLUMN.start] && fields[COMPETITION_COLUMN.end] && fields[COMPETITION_COLUMN.start] > fields[COMPETITION_COLUMN.end]) {
+    throw userError_('Дата завершения раньше даты начала');
+  }
+  Object.keys(fields).forEach(function (column) {
+    if (table.headers.indexOf(column) === -1) throw userError_('Нет столбца «' + column + '» на листе «' + SHEET.competitions + '»');
+  });
+
+  let id = String(input.id || '').trim();
+  const created = !id;
+  if (created) {
+    id = newId_();
+    table.sheet.appendRow(safeRow_(table.headers.map(function (h, i) {
+      if (i === 0) return id;
+      return fields.hasOwnProperty(h) ? fields[h] : '';
+    })));
+  } else {
+    const row = findById_(table, id);
+    if (!row) throw userError_('Соревнование не найдено — возможно, его уже перенесли в архив');
+    writeFields_(table, freshRow_(table, row, id), fields);
+  }
+  log_(ss, created ? 'Соревнование создано' : 'Соревнование изменено', user, {
+    athleteId: admin.id,
+    text: fields[COMPETITION_COLUMN.title] + ' (' + id + ')',
+  });
+
+  SpreadsheetApp.flush();
+  forgetSheet_(SHEET.competitions);
+  const saved = readTable_(ss, SHEET.competitions);
+
+  // Рассылка — после снятия блокировки записи (afterUnlock_): она идёт секунды, а запись других пользователей
+  // ждать её не должна. От повтора рассылку защищают своя блокировка таблицы и отметка «Рассылка»
+  afterUnlock_ = function (result) {
+    try {
+      const sent = notifyNewCompetitionsWhere_(ss, function (row) { return String(row.values[0]).trim() === id; });
+      if (!sent) return result;
+      // Рассылка записала время в «Рассылку» — копия листа в кэше устарела, а приложению нужна свежая строка
+      invalidateSheets_([SHEET.competitions]);
+      forgetSheet_(SHEET.competitions);
+      const fresh = readTable_(ss, SHEET.competitions);
+      const row = findById_(fresh, id);
+      result.notified = true;
+      if (row) result.row = rowObject_(fresh.headers, row.values);
+    } catch (err) {
+      // Соревнование уже сохранено — ответ остаётся успешным; рассылку доделает триггер при следующей правке строки
+      console.error('Рассылка о соревновании ' + id + ': ' + err);
+      logQuotaError_(err, 'Рассылка о соревновании');
+      log_(ss, 'Рассылка: ошибка', { id: '' }, { text: fields[COMPETITION_COLUMN.title] + ' (' + id + '): ' + err });
+    }
+    return result;
+  };
+  return {
+    status: 'success',
+    id: id,
+    created: created,
+    notified: false,
+    row: rowObject_(saved.headers, findById_(saved, id).values),
+  };
+}
+
+// ---------- Администрирование: оружие ----------
+
+// Пара «Название + Номер» для сравнения: без учёта регистра, «ё/е» и лишних пробелов
+function weaponKey_(title, number) {
+  const norm = function (s) { return String(s || '').replace(/\s+/g, ' ').trim().toLowerCase().replace(/ё/g, 'е'); };
+  return norm(title) + '|' + norm(number);
+}
+
+// Единица справочника с той же парой «Название + Номер» (кроме exceptId) или null
+function sameWeapon_(weapons, title, number, exceptId) {
+  const key = weaponKey_(title, number);
+  for (let i = 0; i < weapons.rows.length; i++) {
+    const row = weapons.rows[i];
+    if (String(row.values[0]).trim() === exceptId) continue;
+    if (weaponKey_(weapons.get(row, WEAPON_COLUMN.title), weapons.get(row, WEAPON_COLUMN.number)) === key) return row;
+  }
+  return null;
+}
+
+// Название и номер из приложения: оба обязательны
+function weaponInput_(input) {
+  const title = String(input.title || '').replace(/\s+/g, ' ').trim().slice(0, TITLE_MAX_LENGTH);
+  const number = String(input.number || '').replace(/\s+/g, ' ').trim().slice(0, NAME_MAX_LENGTH);
+  if (!title) throw userError_('Укажите название оружия');
+  if (!number) throw userError_('Укажите номер оружия');
+  return { title: title, number: number };
+}
+
+// Новая строка справочника «Оружие» — возвращает её ID
+function appendWeapon_(weapons, weapon) {
+  [WEAPON_COLUMN.title, WEAPON_COLUMN.number].forEach(function (column) { weapons.col(column); });
+  const id = newId_();
+  weapons.sheet.appendRow(safeRow_(weapons.headers.map(function (h, i) {
+    if (i === 0) return id;
+    if (h === WEAPON_COLUMN.title) return weapon.title;
+    if (h === WEAPON_COLUMN.number) return weapon.number;
+    return '';
+  })));
+  return id;
+}
+
+// Сохранённая строка справочника { заголовок: значение } — перечитывается из таблицы
+function weaponRow_(ss, id) {
+  SpreadsheetApp.flush();
+  forgetSheet_(SHEET.weapons);
+  const saved = readTable_(ss, SHEET.weapons);
+  return rowObject_(saved.headers, findById_(saved, id).values);
+}
+
+// Создание (без id) или правка единицы справочника: input — { id?, title, number }. Номер не уникален,
+// уникальна пара «Название + Номер». Поданные заявки не меняются — в них оружие записано текстом
+function adminSaveWeapon_(user, input) {
+  const ss = spreadsheet_();
+  const admin = requireAdmin_(ss, user);
+  const weapons = readTable_(ss, SHEET.weapons);
+  const weapon = weaponInput_(input);
+  let id = String(input.id || '').trim();
+  if (sameWeapon_(weapons, weapon.title, weapon.number, id)) throw userError_(weapon.title + ' ' + weapon.number + ' уже есть в справочнике');
+
+  const created = !id;
+  if (created) {
+    id = appendWeapon_(weapons, weapon);
+  } else {
+    const row = findById_(weapons, id);
+    if (!row) throw userError_('Оружие не найдено — обновите данные');
+    const fields = {};
+    fields[WEAPON_COLUMN.title] = weapon.title;
+    fields[WEAPON_COLUMN.number] = weapon.number;
+    writeFields_(weapons, freshRow_(weapons, row, id), fields);
+  }
+  log_(ss, created ? 'Оружие добавлено в справочник' : 'Оружие изменено', user, { athleteId: admin.id, text: weapon.title + ' ' + weapon.number });
+  return { status: 'success', id: id, created: created, row: weaponRow_(ss, id) };
+}
+
+// Удаление единицы из справочника вместе с её закреплениями. Заявки не меняются — в них оружие записано текстом
+function adminDeleteWeapon_(user, input) {
+  const ss = spreadsheet_();
+  const admin = requireAdmin_(ss, user);
+  const id = String(input.weaponId || '').trim();
+  const weapons = readTable_(ss, SHEET.weapons);
+  const weapon = findById_(weapons, id);
+  if (!weapon) throw userError_('Оружие не найдено — обновите данные');
+  const title = weaponTitle_(weapons, weapon);
+
+  const links = deleteRowsWhere_(ss, SHEET.athleteWeapons, function (values, headers) {
+    return String(values[headers.indexOf(ATHLETE_WEAPON_COLUMN.weaponId)]).trim() === id;
+  });
+  deleteRowsWhere_(ss, SHEET.weapons, function (values) { return String(values[0]).trim() === id; });
+  log_(ss, 'Оружие удалено из справочника', user, { athleteId: admin.id, text: title + '. Откреплено: ' + links.length });
+  return { status: 'success', weaponId: id, links: links.length };
+}
+
+// Закрепление единицы за спортсменом администратором: input — { athleteId, weaponId } или { athleteId, newWeapon: { title,
+// number } } — новую единицу сначала заводят в справочнике (если такая пара уже есть — берётся она)
+function adminAssignWeapon_(user, input) {
+  const ss = spreadsheet_();
+  const athletes = athletesTable_(ss);
+  const admin = requireAdmin_(ss, user, athletes);
+  const athlete = findAthlete_(athletes, function (a) { return a.id === String(input.athleteId || '').trim(); });
+  if (!athlete) throw userError_('Спортсмен не найден — обновите данные');
+
+  let weaponId = String(input.weaponId || '').trim();
+  let weaponRow = null;
+  if (!weaponId && input.newWeapon) {
+    const weapons = readTable_(ss, SHEET.weapons);
+    const weapon = weaponInput_(input.newWeapon);
+    const existing = sameWeapon_(weapons, weapon.title, weapon.number, '');
+    if (existing) {
+      weaponId = String(existing.values[0]).trim();
+    } else {
+      weaponId = appendWeapon_(weapons, weapon);
+      log_(ss, 'Оружие добавлено в справочник', user, { athleteId: admin.id, text: weapon.title + ' ' + weapon.number });
+      weaponRow = weaponRow_(ss, weaponId);
+    }
+  }
+  const result = linkWeapon_(ss, athlete.id, weaponId);
+  if (!result.already) {
+    log_(ss, 'Оружие закреплено', user, { athleteId: athlete.id, text: result.title + ' за ' + athlete.shortName + '. Закрепил: ' + admin.fullName });
+  }
+  return {
+    status: 'success',
+    link: result.link,
+    weaponRow: weaponRow,
+    message: result.title + (result.already ? ' уже закреплено за ' : ' закреплено за ') + athlete.shortName,
+  };
+}
+
+// Открепление администратором: input — { athleteId, weaponId }
+function adminUnassignWeapon_(user, input) {
+  const ss = spreadsheet_();
+  const athletes = athletesTable_(ss);
+  const admin = requireAdmin_(ss, user, athletes);
+  const athlete = findAthlete_(athletes, function (a) { return a.id === String(input.athleteId || '').trim(); });
+  if (!athlete) throw userError_('Спортсмен не найден — обновите данные');
+  const result = unlinkWeapon_(ss, athlete.id, input.weaponId);
+  if (!result.already) {
+    log_(ss, 'Оружие откреплено', user, { athleteId: athlete.id, text: result.title + ' от ' + athlete.shortName + '. Открепил: ' + admin.fullName });
+  }
+  return {
+    status: 'success',
+    link: result.link,
+    message: result.title + (result.already ? ' уже не закреплено за ' : ' откреплено от ') + athlete.shortName,
+  };
+}
+
+// ---------- Файл Excel ----------
+// Минимальный .xlsx (Office Open XML) без Google Диска: XML-части листа, упакованные Utilities.zip.
+// rows — строки значений, первая — заголовки (жирным, закреплена, с автофильтром). Даты — датами Excel
+// (дд.мм.гггг), числа — числами, остальное — текстом с переносом строк
+
+function xlsxBlob_(sheetTitle, rows, fileName) {
+  const xml = function (s) {
+    // Управляющие символы в XML недопустимы — убираем (кроме табуляции и переносов)
+    return String(s).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  };
+  const columnName = function (index) {
+    let name = '';
+    for (let n = index + 1; n > 0; n = Math.floor((n - 1) / 26)) name = String.fromCharCode(65 + (n - 1) % 26) + name;
+    return name;
+  };
+  // Дата Excel — дни от 30.12.1899; берём календарные дату и время в часовом поясе скрипта
+  const serial = function (d) {
+    return (Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes(), d.getSeconds()) -
+      Date.UTC(1899, 11, 30)) / 86400000;
+  };
+  // Стили (cellXfs ниже): 1 — дата, 2 — текст с переносом, 3 — заголовок
+  const cell = function (value, ref, isHeader) {
+    if (value instanceof Date) return '<c r="' + ref + '" s="1"><v>' + serial(value) + '</v></c>';
+    if (typeof value === 'number' && isFinite(value)) return '<c r="' + ref + '"><v>' + value + '</v></c>';
+    const text = String(value === null || value === undefined ? '' : value);
+    if (!text) return '';
+    return '<c r="' + ref + '" t="inlineStr" s="' + (isHeader ? 3 : 2) + '"><is><t xml:space="preserve">' + xml(text) + '</t></is></c>';
+  };
+
+  const width = rows[0].length;
+  const lastColumn = columnName(width - 1);
+  // Ширина столбца — по самой длинной строке текста в нём (в пределах 8…60 символов)
+  const widths = rows[0].map(function (_, c) {
+    let max = 8;
+    rows.forEach(function (row) {
+      const value = row[c];
+      const text = value instanceof Date ? '00.00.0000' : String(value === null || value === undefined ? '' : value);
+      text.split('\n').forEach(function (line) { max = Math.max(max, line.length + 2); });
+    });
+    return Math.min(max, 60);
+  });
+
+  const sheetXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+    '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>' +
+    '<cols>' + widths.map(function (w, c) { return '<col min="' + (c + 1) + '" max="' + (c + 1) + '" width="' + w + '" customWidth="1"/>'; }).join('') + '</cols>' +
+    '<sheetData>' + rows.map(function (row, r) {
+      return '<row r="' + (r + 1) + '">' + row.map(function (value, c) { return cell(value, columnName(c) + (r + 1), r === 0); }).join('') + '</row>';
+    }).join('') + '</sheetData>' +
+    '<autoFilter ref="A1:' + lastColumn + rows.length + '"/>' +
+    '</worksheet>';
+
+  const parts = {
+    '[Content_Types].xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+      '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+      '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
+      '</Types>',
+    '_rels/.rels': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+      '</Relationships>',
+    'xl/workbook.xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+      '<sheets><sheet name="' + xml(sheetTitle.slice(0, 31)) + '" sheetId="1" r:id="rId1"/></sheets>' +
+      '<definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">\'' + xml(sheetTitle.slice(0, 31)) + '\'!$A$1:$' + lastColumn + '$' + rows.length + '</definedName></definedNames>' +
+      '</workbook>',
+    'xl/_rels/workbook.xml.rels': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' +
+      '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
+      '</Relationships>',
+    'xl/worksheets/sheet1.xml': sheetXml,
+    'xl/styles.xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+      '<numFmts count="1"><numFmt numFmtId="164" formatCode="dd.mm.yyyy"/></numFmts>' +
+      '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>' +
+      '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>' +
+      '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>' +
+      '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+      '<cellXfs count="4">' +
+      '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' +
+      '<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment vertical="top"/></xf>' +
+      '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>' +
+      '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf>' +
+      '</cellXfs>' +
+      '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>' +
+      '</styleSheet>',
+  };
+  const blobs = Object.keys(parts).map(function (path) { return Utilities.newBlob(parts[path], 'application/xml', path); });
+  return Utilities.zip(blobs, fileName).setContentType('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+}
+
 // ---------- Работа с листами ----------
 // Чтение листа — самая долгая часть вызова скрипта. Поэтому:
 //  - за один вызов каждый лист читается из таблицы не больше одного раза (sheetValuesMemo_);
@@ -870,7 +1617,7 @@ function setNotifications_(user, input) {
 // старая копия перестаёт находиться. Читатель узнаёт метку ДО чтения таблицы и кладёт копию под неё же:
 // если запись случилась во время чтения, устаревшая копия ляжет под уже ненужную метку и никому не попадётся.
 // Итог: загрузка, начатая после завершения записи, всегда видит эту запись. Правки другими скриптами
-// (например, перенос соревнований в архив) скрипт не замечает — они видны через SHEET_CACHE_SECONDS
+// (например, перенос строк скриптом другого проекта) скрипт не замечает — они видны через SHEET_CACHE_SECONDS
 // или сразу по кнопке «Обновить» (загрузка листов с fresh).
 
 // Значения листов, уже прочитанных в этом вызове скрипта (глобальные переменные живут один вызов)
@@ -952,10 +1699,15 @@ function sheetCache_() {
   return result;
 }
 
-function cachePutSheet_(ss, name, generation, values) {
-  const json = JSON.stringify(values.map(function (row) {
+// Копия листа для кэша — JSON, даты как { $d: время }
+function sheetCacheJson_(values) {
+  return JSON.stringify(values.map(function (row) {
     return row.map(function (cell) { return cell instanceof Date ? { $d: cell.getTime() } : cell; });
   }));
+}
+
+function cachePutSheet_(ss, name, generation, values) {
+  const json = sheetCacheJson_(values);
   // Слишком большой для CacheService — лист будет читаться из таблицы при каждой загрузке
   if (json.length > SHEET_CACHE_MAX_CHARS) {
     logOversizedSheet_(ss, name, json.length);
@@ -1008,6 +1760,7 @@ function readTable_(ss, name) {
   };
   let sheet = null;
   return {
+    name: name,
     get sheet() {
       if (!sheet) sheet = ss.getSheetByName(name);
       return sheet;
@@ -1017,6 +1770,55 @@ function readTable_(ss, name) {
     col: col,
     get: function (row, column) { return row.values[col(column)]; },
   };
+}
+
+// Значения листа, прочитанные в этом вызове, устарели (лист только что изменили) — следующее чтение возьмёт свежие
+function forgetSheet_(name) {
+  delete sheetValuesMemo_[name];
+}
+
+// Удаление строк листа, для которых matches(values, headers) — true. Строки ищутся по свежему чтению листа прямо
+// перед удалением (под блокировкой скрипта), удаляются снизу вверх. beforeDelete(rows, headers) — например, копия в архив.
+// Возвращает значения удалённых строк (сверху вниз)
+function deleteRowsWhere_(ss, name, matches, beforeDelete) {
+  const sheet = ss.getSheetByName(name);
+  if (!sheet) return [];
+  const values = sheet.getDataRange().getValues();
+  const headers = (values[0] || []).map(String);
+  const found = [];
+  for (let r = 1; r < values.length; r++) {
+    if (String(values[r][0]).trim() !== '' && matches(values[r], headers)) found.push({ row: r + 1, values: values[r] });
+  }
+  if (!found.length) return [];
+  const rows = found.map(function (f) { return f.values; });
+  if (beforeDelete) beforeDelete(rows, headers);
+  deleteRowNumbers_(sheet, found.map(function (f) { return f.row; }));
+  forgetSheet_(name);
+  return rows;
+}
+
+// Удаление строк листа по номерам: подряд идущие — одним вызовом deleteRows, блоки — снизу вверх,
+// чтобы номера ещё не удалённых строк не сдвигались. Каждый вызов к таблице — сотни миллисекунд под блокировкой записи
+function deleteRowNumbers_(sheet, rows) {
+  const sorted = rows.slice().sort(function (a, b) { return b - a; });
+  let i = 0;
+  while (i < sorted.length) {
+    const bottom = sorted[i];
+    let top = bottom;
+    while (i + 1 < sorted.length && sorted[i + 1] === top - 1) top = sorted[++i];
+    i++;
+    sheet.deleteRows(top, bottom - top + 1);
+  }
+}
+
+// Строки в конец листа одной записью (вместо appendRow на каждую). Строк в сетке листа не хватает — добавляются
+// (appendRow делает это сам, а getRange за пределами сетки — ошибка)
+function appendRows_(sheet, rows) {
+  if (!rows.length) return;
+  const first = sheet.getLastRow() + 1;
+  const missing = first + rows.length - 1 - sheet.getMaxRows();
+  if (missing > 0) sheet.insertRowsAfter(sheet.getMaxRows(), missing);
+  sheet.getRange(first, 1, rows.length, rows[0].length).setValues(rows.map(safeRow_));
 }
 
 function findById_(table, id) {
@@ -1030,7 +1832,8 @@ function findById_(table, id) {
 
 // ---------- Чтение листов ----------
 
-function readSheets_(ss, names, athleteId) {
+// isAdmin — администратору листы отдаются целиком: все столбцы спортсменов, все заявки, все соревнования
+function readSheets_(ss, names, athleteId, isAdmin) {
   // Список не задан или пуст — все листы приложения
   const wanted = names && names.length ? names.map(function (n) { return String(n).trim(); }) : APP_SHEETS;
   const sheets = {};
@@ -1047,6 +1850,11 @@ function readSheets_(ss, names, athleteId) {
 
     // У других спортсменов отдаются только столбцы ATHLETE_PUBLIC_COLUMNS (участников выбирают по ФИО), своя строка —
     // целиком. Столбцы, добавленные в лист позже (документы, даты рождения и т.п.), другим так не попадут
+    if (isAdmin) {
+      sheets[name] = { headers: headers, rows: rows };
+      return;
+    }
+
     if (name === SHEET.athletes) {
       rows = rows.map(function (row) {
         if (String(row[0]).trim() === athleteId) return row;
@@ -1163,7 +1971,7 @@ function botUsername_() {
   const cached = cache.get('bot-username');
   if (cached) return cached;
   try {
-    const bot = JSON.parse(UrlFetchApp.fetch('https://api.telegram.org/bot' + botToken_() + '/getMe', { muteHttpExceptions: true }).getContentText());
+    const bot = JSON.parse(fetch_('https://api.telegram.org/bot' + botToken_() + '/getMe', { muteHttpExceptions: true }).getContentText());
     if (!bot.ok) return '';
     cache.put('bot-username', bot.result.username, 6 * 60 * 60);
     return bot.result.username;
@@ -1187,18 +1995,19 @@ function verifiedPhone_(contactResponse, user) {
 // над кодом → «Выполнить». При первом запуске Google попросит разрешить доступ. Вывод — в «Журнале выполнения»
 // внизу редактора.
 //
-// Новое окружение (например, тестовое: копия таблицы + свой бот) настраивается так:
+// Новое окружение (например, тестовое: копия таблицы + свой бот) настраивается так (полный порядок, с тем,
+// какой идентификатор куда вписывается, — в README, раздел «Настройка нового окружения»):
 //   1. «Настройки проекта» (⚙️): часовой пояс — Europe/Moscow (по нему считаются даты соревнований и сроки
 //      перевозки); «Свойства скрипта»: BOT_TOKEN и MINI_APP_URL (см. шапку файла);
-//   2. installTriggers   — триггер onSheetEdit (или вручную в разделе «Триггеры»);
-//   3. setupMenuButton   — кнопка меню бота ведёт в приложение этого окружения;
-//   4. removeWebhook     — если checkSetup показывает вебхук (сообщения боту уходят старому коду);
-//      markExistingCompetitions — один раз после добавления столбца «Рассылка» в «Соревнования»;
-//   5. «Развернуть» → новое развёртывание (веб-приложение, «Выполнять как: я», доступ «Все») — его адрес
-//      вписать в VITE_GOOGLE_SCRIPT_URL файла .env этого окружения;
-//   6. checkSetup        — проверить, что всё сходится.
-// Адрес стартовой кнопки бота (Main Mini App) через Bot API не меняется — только в @BotFather:
-// Bot Settings → Configure Mini App → Edit Mini App URL.
+//   2. installTriggers   — триггеры (или вручную в разделе «Триггеры»);
+//      markExistingCompetitions — если в «Соревнованиях» уже есть строки;
+//   3. «Развернуть» → новое развёртывание (веб-приложение, «Выполнять как: я», доступ «Все») — его адрес …/exec
+//      вписать в VITE_GOOGLE_SCRIPT_URL файла .env этого окружения и выложить приложение. Новое развёртывание —
+//      один раз; дальше — новая версия того же развёртывания, адрес не меняется;
+//   4. setupMenuButton   — кнопка меню бота ведёт в приложение этого окружения;
+//      в @BotFather: Bot Settings → Configure Mini App → Edit Mini App URL — адрес стартовой кнопки бота
+//      (Main Mini App); через Bot API он не меняется;
+//   5. checkSetup        — проверить, что всё сходится; removeWebhook — если checkSetup показывает вебхук.
 
 /**
  * checkSetup — проверка настроек окружения. Ничего не меняет.
@@ -1222,7 +2031,7 @@ function checkSetup() {
   } else {
     lines.push('BOT_TOKEN: ' + rawToken.length + ' символов' + (rawToken !== rawToken.trim() ? ' — есть пробелы или переносы по краям (скрипт их отбрасывает)' : ''));
     const callBot = function (method) {
-      return JSON.parse(UrlFetchApp.fetch('https://api.telegram.org/bot' + rawToken.trim() + '/' + method, { muteHttpExceptions: true }).getContentText());
+      return JSON.parse(fetch_('https://api.telegram.org/bot' + rawToken.trim() + '/' + method, { muteHttpExceptions: true }).getContentText());
     };
     const bot = callBot('getMe');
     lines.push(bot.ok ? 'Бот: @' + bot.result.username + ' (' + bot.result.first_name + ')' : 'Бот: токен не принят Telegram — ' + bot.description);
@@ -1244,8 +2053,13 @@ function checkSetup() {
   lines.push('MINI_APP_URL: ' + (props.getProperty('MINI_APP_URL') || 'не задан'));
   lines.push('Адрес веб-приложения этого скрипта: ' + (ScriptApp.getService().getUrl() || 'не развёрнут'));
   lines.push('Таблица: ' + spreadsheet_().getName());
-  const triggers = ScriptApp.getProjectTriggers().filter(function (t) { return t.getHandlerFunction() === 'onSheetEdit'; });
-  lines.push('Триггер onSheetEdit: ' + (triggers.length ? 'есть' : 'нет'));
+  const handlers = ScriptApp.getProjectTriggers().map(function (t) { return t.getHandlerFunction(); });
+  SCRIPT_TRIGGERS.forEach(function (name) {
+    lines.push('Триггер ' + name + ': ' + (handlers.indexOf(name) !== -1 ? 'есть' : 'нет — запустите installTriggers'));
+  });
+  lines.push('');
+  lines.push('Запас по лимитам (⚠ — занято больше ' + Math.round(LIMIT_WARN_SHARE * 100) + '%):');
+  limitsReport_(spreadsheet_()).forEach(function (line) { lines.push(line); });
   // И в журнал выполнения, и строкой в «_Журнал» — там вывод видно, даже если журнал выполнения не открылся
   console.log(lines.join('\n'));
   log_(spreadsheet_(), 'Проверка настроек', { id: '' }, { text: lines.join('\n') });
@@ -1268,7 +2082,7 @@ function checkSetup() {
 function setupMenuButton() {
   const appUrl = miniAppUrl_();
   if (!appUrl) throw new Error('Не задано свойство скрипта MINI_APP_URL');
-  const response = UrlFetchApp.fetch('https://api.telegram.org/bot' + botToken_() + '/setChatMenuButton', {
+  const response = fetch_('https://api.telegram.org/bot' + botToken_() + '/setChatMenuButton', {
     method: 'post',
     contentType: 'application/json',
     muteHttpExceptions: true,
@@ -1283,7 +2097,7 @@ function setupMenuButton() {
   const chatIds = athletesTable_(spreadsheet_()).athletes
     .map(function (a) { return a.chatId; })
     .filter(function (id, i, all) { return id && all.indexOf(id) === i; });
-  const responses = UrlFetchApp.fetchAll(chatIds.map(function (chatId) {
+  const responses = fetchAll_(chatIds.map(function (chatId) {
     return {
       url: 'https://api.telegram.org/bot' + botToken_() + '/setChatMenuButton',
       method: 'post',
@@ -1310,7 +2124,7 @@ function setupMenuButton() {
  * Что выводит: «Вебхук снят» или ошибку Telegram. Сообщения, ждущие обработки, отбрасываются.
  */
 function removeWebhook() {
-  const response = UrlFetchApp.fetch('https://api.telegram.org/bot' + botToken_() + '/deleteWebhook?drop_pending_updates=true', {
+  const response = fetch_('https://api.telegram.org/bot' + botToken_() + '/deleteWebhook?drop_pending_updates=true', {
     muteHttpExceptions: true,
   });
   const result = JSON.parse(response.getContentText());
@@ -1344,18 +2158,88 @@ function markExistingCompetitions() {
 }
 
 /**
- * installTriggers — триггер onSheetEdit на ручные правки таблицы (ID новым строкам, сброс кэша, уведомления).
+ * installTriggers — триггеры скрипта:
+ *  - onSheetEdit на ручные правки таблицы (ID новым строкам, сброс кэша, уведомления);
+ *  - archivePastApplications раз в сутки в ARCHIVE_HOUR (перенос заявок прошедших соревнований в архив).
  *
- * Когда запускать: один раз при настройке окружения. Повторный запуск безопасен — прежний триггер onSheetEdit
- * удаляется, дублей не будет; другие триггеры не трогаются.
- * Если Google отвечает «Произошла неизвестная ошибка» — создайте триггер вручную: «Триггеры» (⏰) →
- * «Добавить триггер» → функция onSheetEdit, источник «Из таблицы», тип «При изменении».
+ * Когда запускать: один раз при настройке окружения. Повторный запуск безопасен — прежние триггеры этих функций
+ * удаляются, дублей не будет; другие триггеры не трогаются.
+ * Если Google отвечает «Произошла неизвестная ошибка» — создайте триггеры вручную: «Триггеры» (⏰) →
+ * «Добавить триггер» → функция onSheetEdit, источник «Из таблицы», тип «При изменении»; функция
+ * archivePastApplications, источник «Время», «Ежедневно», ночью.
  */
 function installTriggers() {
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
-    if (trigger.getHandlerFunction() === 'onSheetEdit') ScriptApp.deleteTrigger(trigger);
+    if (SCRIPT_TRIGGERS.indexOf(trigger.getHandlerFunction()) !== -1) ScriptApp.deleteTrigger(trigger);
   });
   ScriptApp.newTrigger('onSheetEdit').forSpreadsheet(spreadsheet_()).onEdit().create();
+  ScriptApp.newTrigger('archivePastApplications').timeBased().everyDays(1).atHour(ARCHIVE_HOUR).create();
+}
+
+// Функции, на которые installTriggers ставит триггеры
+const SCRIPT_TRIGGERS = ['onSheetEdit', 'archivePastApplications'];
+
+// ---------- Перенос заявок в архив ----------
+
+// Час (по часовому поясу скрипта), в который раз в сутки срабатывает перенос — ночью, когда приложением не пользуются
+const ARCHIVE_HOUR = 3;
+
+/**
+ * archivePastApplications — перенос в «Архив заявок» заявок, чьё соревнование прошло: со следующего дня после
+ * «Сроки по ЕКП окончание» (пусто — после «Сроки по ЕКП начало»). Переносятся заявки в любом статусе, статус в архиве —
+ * прежний. Заявки без даты по ЕКП (или с датой, которую не разобрать) остаются — их переносят вручную.
+ * Соревнования не переносятся.
+ *
+ * Запускает триггер по времени раз в сутки в ARCHIVE_HOUR (ставит installTriggers); можно запустить и вручную.
+ * Под блокировкой записи — той же, что у запросов приложения: перенос не пересечётся с подачей, удалением заявки
+ * или удалением спортсмена. Не дождался блокировки — перенос случится в следующий запуск.
+ * Возвращает, сколько заявок перенесено. Итог — в «_Журнал»
+ */
+function archivePastApplications() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(60000)) {
+    console.log('Перенос заявок в архив: сервер занят — перенос в следующий запуск');
+    return 0;
+  }
+  try {
+    const ss = spreadsheet_();
+    const archive = readTable_(ss, SHEET.applicationsArchive);
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const moved = deleteRowsWhere_(ss, SHEET.applications, function (values, headers) {
+      const cell = function (column) {
+        const i = headers.indexOf(column);
+        return i === -1 ? '' : values[i];
+      };
+      const end = sheetDate_(cell(APPLICATION_COLUMN.ekpEnd)) || sheetDate_(cell(APPLICATION_COLUMN.ekpStart));
+      return Boolean(end) && end < today;
+    }, function (rows, headers) {
+      // Сначала копии в архив (одной записью), потом удаление — чтобы заявки не потерялись при ошибке
+      appendRows_(archive.sheet, rows.map(function (values) {
+        return archive.headers.map(function (h) {
+          const i = headers.indexOf(h);
+          return i === -1 ? '' : values[i];
+        });
+      }));
+    });
+    if (!moved.length) return 0;
+
+    invalidateSheets_([SHEET.applications]);
+    // Память уведомлений перенесённых строк больше не нужна
+    const props = PropertiesService.getScriptProperties();
+    const numbers = moved.map(function (values) { return String(values[0]).trim(); });
+    numbers.forEach(function (number) { props.deleteProperty(notifiedKey_(SHEET.applications, number)); });
+    log_(ss, 'Перенос заявок в архив', { id: '' }, {
+      text: 'Соревнование прошло — перенесены в «' + SHEET.applicationsArchive + '»: № ' + numbers.join(', '),
+    });
+    return moved.length;
+  } catch (err) {
+    console.error('archivePastApplications: ' + err);
+    logQuotaError_(err, 'Перенос заявок в архив');
+    throw err; // ошибка видна в «Выполнениях», а Google пришлёт владельцу письмо о сбое триггера
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // ---------- Ручные правки таблицы и уведомления в Telegram ----------
@@ -1384,6 +2268,7 @@ function onSheetEdit(e) {
     if (sheetName === SHEET.applications) notifyApplicationStatus_(ss, e.range);
   } catch (err) {
     console.error('onSheetEdit: ' + err);
+    logQuotaError_(err, 'Правка таблицы');
   }
 }
 
@@ -1420,22 +2305,29 @@ function assignMissingIds_(range) {
 // Под блокировкой: два быстрых срабатывания триггера подряд иначе оба увидели бы пустую отметку. Блокировка — таблицы,
 // а не скрипта: рассылка всем перевозчикам идёт долго, и запросы приложения (doPost) не должны её ждать
 function notifyNewCompetitions_(ss, range) {
+  notifyNewCompetitionsWhere_(ss, function (row) { return rowInRange_(range, row.row); });
+}
+
+// Рассылка о новых соревнованиях среди строк, для которых isCandidate(row) — true (строка из readTable_).
+// Возвращает, о скольких соревнованиях разослано. Вызывается и триггером, и после сохранения соревнования из приложения
+function notifyNewCompetitionsWhere_(ss, isCandidate) {
+  let sent = 0;
   const lock = LockService.getDocumentLock() || LockService.getScriptLock();
-  if (!lock.tryLock(20000)) return; // не дождались — строку подхватит следующая правка
+  if (!lock.tryLock(20000)) return 0; // не дождались — строку подхватит следующая правка
   try {
     const competitions = readTable_(ss, SHEET.competitions);
-    if (competitions.headers.indexOf(COMPETITION_COLUMN.notified) === -1) return;
+    if (competitions.headers.indexOf(COMPETITION_COLUMN.notified) === -1) return 0;
     const notifiedCol = competitions.col(COMPETITION_COLUMN.notified) + 1;
 
     const ready = competitions.rows.filter(function (row) {
-      if (!rowInRange_(range, row.row)) return false;
+      if (!isCandidate(row)) return false;
       if (String(competitions.get(row, COMPETITION_COLUMN.notified)).trim() !== '') return false;
       const filled = NEW_COMPETITION_REQUIRED.every(function (column) {
         return String(competitions.get(row, column)).trim() !== '';
       });
       return filled && isUpcoming_(competitions.get(row, COMPETITION_COLUMN.start));
     });
-    if (!ready.length) return;
+    if (!ready.length) return 0;
 
     const allCarriers = athletesTable_(ss).athletes.filter(function (a) {
       return a.status === ATHLETE_STATUS.confirmed && a.isCarrier && a.chatId;
@@ -1447,7 +2339,7 @@ function notifyNewCompetitions_(ss, range) {
       const text = competitionMessage_(competitions, row);
       // Кнопка ведёт сразу в мастер заявки на этом соревновании
       const button = { text: 'Подать заявку', params: { page: 'application-form', competition: String(row.values[0]).trim() } };
-      const responses = UrlFetchApp.fetchAll(carriers.map(function (a) {
+      const responses = fetchAll_(carriers.map(function (a) {
         const args = telegramRequestArgs_(a.chatId, text, button);
         args[1].url = args[0];
         return args[1];
@@ -1458,6 +2350,7 @@ function notifyNewCompetitions_(ss, range) {
         if (error) failed.push(carriers[i].shortName + ' — ' + error);
       });
       competitions.sheet.getRange(row.row, notifiedCol).setValue(new Date());
+      sent++;
       const title = String(competitions.get(row, COMPETITION_COLUMN.title)).trim();
       log_(ss, 'Рассылка: новое соревнование', { id: '' }, {
         text: title + ' — отправлено ' + (carriers.length - failed.length) + ' из ' + carriers.length + ' перевозчикам' +
@@ -1468,6 +2361,7 @@ function notifyNewCompetitions_(ss, range) {
   } finally {
     lock.releaseLock();
   }
+  return sent;
 }
 
 // Текст рассылки о соревновании: название, вид, даты, адрес
@@ -1498,11 +2392,14 @@ function notifyConfirmedAthletes_(ss, range) {
     return { id: athlete.id, row: athlete.row, status: athlete.status, athlete: athlete };
   });
   notifyStatusChanges_(SHEET.athletes, items, range, [ATHLETE_STATUS.confirmed], function (item) {
-    const athlete = item.athlete;
-    if (!athlete.chatId) return;
-    notify_(ss, athlete, 'Здравствуйте, ' + athlete.greetingName + '! Ваш доступ к приложению подтверждён.',
-      'Уведомление: доступ подтверждён');
+    sendAccessConfirmed_(ss, item.athlete);
   });
+}
+
+function sendAccessConfirmed_(ss, athlete) {
+  if (!athlete.chatId) return;
+  notify_(ss, athlete, 'Здравствуйте, ' + athlete.greetingName + '! Ваш доступ к приложению подтверждён.',
+    'Уведомление: доступ подтверждён');
 }
 
 function notifyApplicationStatus_(ss, range) {
@@ -1514,15 +2411,51 @@ function notifyApplicationStatus_(ss, range) {
     return { id: String(row.values[0]).trim(), row: row.row, status: String(applications.get(row, APPLICATION_COLUMN.status)).trim(), source: row };
   });
   notifyStatusChanges_(SHEET.applications, items, range, NOTIFY_APPLICATION_STATUSES, function (item) {
-    const row = item.source;
-    const authorId = String(applications.get(row, APPLICATION_COLUMN.createdBy)).trim();
-    const author = findAthlete_(athletes, function (a) { return a.id === authorId; });
-    if (!author || !author.chatId || !author.wantsApplications) return;
-
-    const title = String(applications.get(row, APPLICATION_COLUMN.competitionTitle)).trim();
-    notify_(ss, author, 'Заявка № ' + item.id + (title ? ' (' + title + ')' : '') + ': статус изменён на «' + item.status + '».',
-      'Уведомление: заявка № ' + item.id + ' — ' + item.status);
+    sendApplicationStatus_(ss, athletes, applications.headers, item.source.values);
   });
+}
+
+// Смена статуса заявки из приложения (администратором). Записи скрипта не запускают onSheetEdit, поэтому
+// сообщение автору отправляется здесь — с той же памятью «о каком статусе уже сообщено», что и у триггера:
+// если потом тот же статус вставят в таблице вручную, второго сообщения не будет
+function notifyApplicationStatusNow_(ss, headers, values) {
+  const status = String(values[headers.indexOf(APPLICATION_COLUMN.status)]).trim();
+  if (notifyStatusNow_(SHEET.applications, String(values[0]).trim(), status, NOTIFY_APPLICATION_STATUSES)) {
+    sendApplicationStatus_(ss, athletesTable_(ss), headers, values);
+  }
+}
+
+// Память «о каком статусе строки уже сообщено» (как у notifyStatusChanges_) для записи из приложения: true — статус
+// новый и о нём нужно сообщить (память уже обновлена); статус не из notifyStatuses — память строки стирается
+function notifyStatusNow_(sheetName, id, status, notifyStatuses) {
+  const props = PropertiesService.getScriptProperties();
+  const key = notifiedKey_(sheetName, id);
+  if (notifyStatuses.indexOf(status) === -1) {
+    props.deleteProperty(key);
+    return false;
+  }
+  if (props.getProperty(key) === status) return false;
+  props.setProperty(key, status);
+  return true;
+}
+
+// Сообщение автору заявки о её статусе (если автор не отключил такие сообщения). У «Отклонена» — с причиной
+function sendApplicationStatus_(ss, athletes, headers, values) {
+  const value = function (column) {
+    const i = headers.indexOf(column);
+    return i === -1 ? '' : String(values[i]).trim();
+  };
+  const number = String(values[0]).trim();
+  const status = value(APPLICATION_COLUMN.status);
+  const authorId = value(APPLICATION_COLUMN.createdBy);
+  const author = findAthlete_(athletes, function (a) { return a.id === authorId; });
+  if (!author || !author.chatId || !author.wantsApplications) return;
+
+  const title = value(APPLICATION_COLUMN.competitionTitle);
+  const reason = status === APPLICATION_STATUS.rejected ? value(APPLICATION_COLUMN.rejectReason) : '';
+  notify_(ss, author, 'Заявка № ' + number + (title ? ' (' + title + ')' : '') + ': статус изменён на «' + status + '».' +
+    (reason ? '\nПричина: ' + reason : ''),
+  'Уведомление: заявка № ' + number + ' — ' + status);
 }
 
 // Уведомления о смене статуса строк. Правка диапазоном (вставка, протягивание) не сообщает прежних значений, поэтому
@@ -1585,7 +2518,7 @@ function notify_(ss, athlete, text, logEvent) {
 // Отправка через Bot API. Возвращает null или текст ошибки (например, пользователь не разрешил боту писать)
 function sendTelegram_(chatId, text) {
   if (!botToken_()) return 'не задано свойство скрипта BOT_TOKEN';
-  return telegramError_(UrlFetchApp.fetch.apply(UrlFetchApp, telegramRequestArgs_(chatId, text)));
+  return telegramError_(fetch_.apply(null, telegramRequestArgs_(chatId, text)));
 }
 
 // Запрос sendMessage с кнопкой, открывающей приложение (если задан MINI_APP_URL): [адрес, параметры] для UrlFetchApp.
@@ -1644,6 +2577,129 @@ function log_(ss, event, user, details) {
   } catch (err) {
     console.error('Не удалось записать в лист ' + SHEET.log + ': ' + err);
   }
+}
+
+// ---------- Лимиты Google ----------
+// Сколько дневного лимита израсходовано, Google не сообщает — только ошибка, когда лимит кончился. Поэтому:
+//  - ошибка лимита пишется в «_Журнал» событием «Лимит Google исчерпан» (одна и та же — не чаще раза в LIMIT_LOG_SECONDS);
+//  - запросы к Telegram (UrlFetch — самый расходуемый лимит) скрипт считает сам и при долях URLFETCH_WARN_SHARES
+//    лимита пишет «Лимит близко»;
+//  - checkSetup показывает запас по объёмам: свойства скрипта, копии листов для кэша, ячейки таблицы.
+// Дневные лимиты — на аккаунт владельца скрипта и общие для всех его скриптов (тестовое окружение, другие триггеры
+// таблицы), а счётчик видит только свои запросы — это ранний сигнал, а не точный остаток.
+// Сообщением Telegram о лимите не предупредить: при исчерпанном UrlFetch бот тоже не может писать
+
+// Значения — для обычного аккаунта Google; у Google Workspace больше (UrlFetch — 100 000 в сутки) — поменяйте
+const URLFETCH_DAILY_LIMIT = 20000;
+const PROPERTIES_MAX_BYTES = 500 * 1024;
+const SPREADSHEET_MAX_CELLS = 10000000;
+// Доли дневного лимита запросов, при которых в «_Журнал» пишется «Лимит близко» (каждая — раз в сутки)
+const URLFETCH_WARN_SHARES = [0.7, 0.9];
+// В отчёте checkSetup — ⚠ у занятого больше этой доли
+const LIMIT_WARN_SHARE = 0.7;
+const LIMIT_LOG_SECONDS = 60 * 60;
+// Дольше CacheService не хранит. Счётчик перезаписывается при каждом запросе; если запросов не было 6 часов, он
+// обнуляется — при таком редком расходе лимит не под угрозой
+const CACHE_MAX_SECONDS = 6 * 60 * 60;
+
+// Тексты ошибок Google об исчерпании лимитов (на английском и русском — зависит от языка аккаунта)
+const QUOTA_ERROR_PATTERN = /too many times|too much computer time|quota|limit exceeded|слишком много раз|слишком много времени|квот|превышен лимит/i;
+
+function isQuotaError_(err) {
+  return QUOTA_ERROR_PATTERN.test(String((err && err.message) || err));
+}
+
+// Ошибка лимита — в «_Журнал» (where — где случилась). Прочие ошибки не трогает
+function logQuotaError_(err, where) {
+  if (!isQuotaError_(err)) return;
+  try {
+    const text = String((err && err.message) || err);
+    const cache = CacheService.getScriptCache();
+    const key = 'quota-error:' + text.slice(0, 80);
+    if (cache.get(key)) return;
+    cache.put(key, '1', LIMIT_LOG_SECONDS);
+    log_(spreadsheet_(), 'Лимит Google исчерпан', { id: '' }, {
+      text: where + ': ' + text + '. Лимиты — на аккаунт владельца скрипта, обновляются в течение суток. ' +
+        'Подробности — в редакторе Apps Script, раздел «Выполнения»',
+    });
+  } catch (e) {
+    console.error('Не удалось записать ошибку лимита: ' + e);
+  }
+}
+
+// Запросы во внешний мир (Telegram) — только через эти обёртки, чтобы их считал countFetches_
+function fetch_(url, options) {
+  countFetches_(1);
+  return UrlFetchApp.fetch(url, options);
+}
+
+function fetchAll_(requests) {
+  countFetches_(requests.length);
+  return UrlFetchApp.fetchAll(requests);
+}
+
+// Ключ счётчика запросов за сутки (по часовому поясу скрипта; у Google окно — скользящие 24 часа, это приближение)
+function fetchCountKey_() {
+  return 'urlfetch:' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+}
+
+// Запросов за сегодня по счётчику скрипта
+function fetchCount_() {
+  return Number(CacheService.getScriptCache().get(fetchCountKey_())) || 0;
+}
+
+// +n запросов к счётчику; перешли долю из URLFETCH_WARN_SHARES — «Лимит близко» в «_Журнал». Счёт приблизительный:
+// параллельные вызовы могут потерять прибавку друг друга. Ошибка счётчика запрос не ломает
+function countFetches_(n) {
+  if (!n) return;
+  try {
+    const cache = CacheService.getScriptCache();
+    const key = fetchCountKey_();
+    const before = Number(cache.get(key)) || 0;
+    const after = before + n;
+    cache.put(key, String(after), CACHE_MAX_SECONDS);
+    URLFETCH_WARN_SHARES.forEach(function (share) {
+      const level = Math.floor(URLFETCH_DAILY_LIMIT * share);
+      if (before >= level || after < level) return;
+      log_(spreadsheet_(), 'Лимит близко', { id: '' }, {
+        text: 'Запросов к Telegram за сегодня: ' + after + ' из ' + URLFETCH_DAILY_LIMIT + ' (' + Math.round(share * 100) +
+          '%) — по счётчику этого скрипта; другие скрипты аккаунта расходуют тот же лимит. Когда он кончится, ' +
+          'перестанут уходить уведомления и рассылки',
+      });
+    });
+  } catch (err) {
+    console.error('Счётчик запросов: ' + err);
+  }
+}
+
+// Строки отчёта о запасе по лимитам для checkSetup
+function limitsReport_(ss) {
+  const share = function (used, limit) {
+    const percent = Math.round((used / limit) * 100);
+    return (used / limit > LIMIT_WARN_SHARE ? '⚠ ' : '') + used + ' из ' + limit + ' (' + percent + '%)';
+  };
+  const lines = [];
+  lines.push('Запросы к Telegram за сегодня (счётчик скрипта): ' + share(fetchCount_(), URLFETCH_DAILY_LIMIT));
+
+  const props = PropertiesService.getScriptProperties().getProperties();
+  const keys = Object.keys(props);
+  const bytes = Utilities.newBlob(keys.map(function (k) { return k + props[k]; }).join('')).getBytes().length;
+  const notified = keys.filter(function (k) { return k.indexOf('notified:') === 0; }).length;
+  lines.push('Свойства скрипта, байт: ' + share(bytes, PROPERTIES_MAX_BYTES) + '; из них памяти уведомлений — ' + notified + ' строк');
+
+  // Лист больше предела в кэш не кладётся и читается из таблицы при каждой загрузке приложения
+  APP_SHEETS.forEach(function (name) {
+    const sheet = ss.getSheetByName(name);
+    if (!sheet) return;
+    const chars = sheetCacheJson_(trimEmptyColumns_(sheet.getDataRange().getValues())).length;
+    lines.push('Лист «' + name + '» для кэша, символов: ' + share(chars, SHEET_CACHE_MAX_CHARS) +
+      (chars > SHEET_CACHE_MAX_CHARS ? ' — не помещается, читается из таблицы при каждой загрузке' : ''));
+  });
+
+  // В лимит таблицы входят все ячейки сетки, и пустые тоже
+  const cells = ss.getSheets().reduce(function (sum, sheet) { return sum + sheet.getMaxRows() * sheet.getMaxColumns(); }, 0);
+  lines.push('Ячеек в таблице (с пустыми): ' + share(cells, SPREADSHEET_MAX_CELLS));
+  return lines;
 }
 
 // ---------- Утилиты ----------

@@ -31,3 +31,7 @@ export const SHEETS_TO_LOAD = Object.values(SHEET);
 
 // Вид транспорта, отмеченный в новой заявке по умолчанию (название из листа «Виды транспорта»)
 export const DEFAULT_TRANSPORT = 'Автомобиль';
+
+// Выгрузка заявок в Excel в разделе «Администрирование». Код готов (и в Apps Script), но кнопка пока скрыта —
+// включить: true
+export const SHOW_EXCEL_EXPORT = false;

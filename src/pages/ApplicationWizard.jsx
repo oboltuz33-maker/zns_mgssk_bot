@@ -379,8 +379,10 @@ function CompetitionStep({ draft, model, me, update, next }) {
   );
 }
 
-// Участники и их оружие на одном экране: каждый добавленный спортсмен — карточка с выбором оружия
-function ParticipantsStep({ draft, model, me, update, showErrors }) {
+// Участники и их оружие на одном экране: каждый добавленный спортсмен — карточка с выбором оружия.
+// me — перевозчик, чьи прошлые заявки подсказывают участников (у администратора — автор заявки);
+// recentLabel — пометка у таких участников
+export function ParticipantsStep({ draft, model, me, update, showErrors, recentLabel = 'Был в ваших заявках' }) {
   const [query, setQuery] = useState('');
   const selectedIds = draft.items.map((i) => i.athleteId);
 
@@ -434,7 +436,7 @@ function ParticipantsStep({ draft, model, me, update, showErrors }) {
               <div className="list-text">
                 <div className="item-title">{a.fullName}</div>
                 <div className="item-hint">
-                  {!query.trim() && recent.includes(a) && 'Был в ваших заявках · '}
+                  {!query.trim() && recent.includes(a) && `${recentLabel} · `}
                   {a.weapons.length ? `🎯 ${a.weapons.map((w) => w.title).join(', ')}` : 'Оружие не закреплено'}
                 </div>
               </div>
@@ -496,7 +498,7 @@ function ParticipantCard({ item, model, onRemove, onWeapons, showErrors }) {
 }
 
 // Окно выбора оружия из справочника поверх экрана: поиск и список; нажатие на единицу выбирает её и закрывает окно
-function WeaponPicker({ title, weapons, onPick, onClose }) {
+export function WeaponPicker({ title, weapons, onPick, onClose }) {
   const [query, setQuery] = useState('');
   const found = fuzzySearch(weapons, query, (w) => `${w.title} ${w.number}`);
   const paged = usePaged(found, ROW_HEIGHT, query);

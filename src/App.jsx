@@ -11,6 +11,10 @@ import { AuthScreen } from './pages/AuthScreen.jsx';
 import { ApplicationWizard } from './pages/ApplicationWizard.jsx';
 import { HelpPage } from './pages/HelpPage.jsx';
 import { ProfilePage } from './pages/ProfilePage.jsx';
+import { AdminPage } from './pages/AdminPage.jsx';
+import { AdminApplicationForm } from './pages/AdminApplicationForm.jsx';
+import { AdminAthleteForm, AdminAthleteWeapons } from './pages/AdminAthletes.jsx';
+import { AdminCompetitionForm } from './pages/AdminCompetitions.jsx';
 import './App.css';
 
 // Метка тестового окружения поверх всех экранов — чтобы не перепутать с рабочим
@@ -20,15 +24,22 @@ const EnvLabel = () => (ENV_LABEL ? <div className="env-label">{ENV_LABEL}</div>
 // primary — главная кнопка меню: выделена и открывается при запуске.
 // focused — страница без нижнего меню (мастер заявки: чтобы случайно не уйти с несохранённым вводом).
 // back — куда ведёт кнопка «Назад» Telegram (по умолчанию — на стартовую).
+// admin — только администраторам: в меню виден только им, остальным вместо него открывается стартовая страница.
 // Разделы вне меню доступны по адресу ?page=<id>
 const PAGES = [
   { id: 'competitions', icon: '🏆', label: 'Соревнования', component: CompetitionsPage, menu: true },
   { id: 'applications', icon: '📝', label: 'Заявки', component: ApplicationsPage, menu: true, primary: true },
   { id: 'weapons', icon: '🎯', label: 'Оружие', component: WeaponsPage, menu: true },
+  { id: 'admin', icon: '🛠', label: 'Админ', component: AdminPage, menu: true, admin: true },
   // «Профиль» — не в меню, а значком 👤 в правом верхнем углу страниц; «Помощь» открывается из профиля
   { id: 'profile', icon: '👤', label: 'Профиль', component: ProfilePage },
   { id: 'help', icon: '❓', label: 'Помощь', component: HelpPage, back: 'profile' },
   { id: 'application-form', icon: '📝', label: 'Заявка', component: ApplicationWizard, focused: true },
+  // Формы администратора: кнопкой «Назад» Telegram управляют сами страницы
+  { id: 'admin-application', icon: '📝', label: 'Заявка', component: AdminApplicationForm, focused: true, admin: true },
+  { id: 'admin-athlete', icon: '👤', label: 'Спортсмен', component: AdminAthleteForm, focused: true, admin: true },
+  { id: 'admin-athlete-weapons', icon: '🎯', label: 'Оружие', component: AdminAthleteWeapons, focused: true, admin: true },
+  { id: 'admin-competition', icon: '🏆', label: 'Соревнование', component: AdminCompetitionForm, focused: true, admin: true },
 ];
 const START_PAGE = PAGES.find((p) => p.primary).id;
 const MENU = PAGES.filter((p) => p.menu);
@@ -70,7 +81,10 @@ function App() {
   const me = findMyAthlete(model);
   // Мастер заявки — только для перевозчиков. По ссылке из бота его может открыть и не перевозчик (например, того,
   // кого перестали считать перевозчиком), — тогда открываются «Заявки», где объяснено, кто подаёт заявки
-  const pageId = page === 'application-form' && sheets.data && !me?.isCarrier ? 'applications' : page;
+  let pageId = page === 'application-form' && sheets.data && !me?.isCarrier ? 'applications' : page;
+  // Разделы администратора не администратору (например, признак сняли) — стартовая страница
+  if (sheets.data && !me?.isAdmin && PAGES.find((p) => p.id === pageId)?.admin) pageId = START_PAGE;
+  const menu = MENU.filter((p) => !p.admin || me?.isAdmin);
 
   useEffect(() => {
     const tg = window.Telegram?.WebApp;
@@ -202,7 +216,7 @@ function App() {
       {!current.focused && (
         <nav className="bottom-nav">
           <div className="bottom-nav-inner">
-            {MENU.map((item) => (
+            {menu.map((item) => (
               <button
                 key={item.id}
                 className={['nav-item', item.primary && 'primary', item.id === pageId && 'active'].filter(Boolean).join(' ')}

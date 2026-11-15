@@ -1,17 +1,11 @@
 import { useState } from 'react';
-import { APPLICATION_STATUS, isUpcomingCompetition } from '../data/model.js';
+import { isUpcomingCompetition } from '../data/model.js';
 import { deleteApplication } from '../data/applications.js';
 import { withoutApplication } from '../data/patches.js';
-import { Badge, EmptyState, PageHeader, SearchInput, ShowMore } from '../components.jsx';
-import { APPLICATION_CARD_HEIGHT, confirmAction, formatDateTime, formatRange, usePaged } from '../helpers.js';
+import { ApplicationCard, CardsOrTable, EmptyState, ListToolbar, PageHeader, SearchInput } from '../components.jsx';
+import { APPLICATION_CARD_HEIGHT, confirmAction, useListView } from '../helpers.js';
 import { fuzzySearch } from '../data/search.js';
-
-const STATUS_TONE = {
-  [APPLICATION_STATUS.new]: 'accent',
-  [APPLICATION_STATUS.inProgress]: 'warning',
-  [APPLICATION_STATUS.done]: 'success',
-  [APPLICATION_STATUS.archived]: 'muted',
-};
+import { MY_APPLICATION_COLUMNS } from '../listColumns.jsx';
 
 export function ApplicationsPage({ model, me, sheets, onOpenPage, onMessage }) {
   // Показываем только заявки текущего спортсмена (CreatedBy = его ID; отбор делает и Apps Script)
@@ -23,8 +17,8 @@ export function ApplicationsPage({ model, me, sheets, onOpenPage, onMessage }) {
   const list = fuzzySearch(mine, query, (a) =>
     [a.number, a.competitionTitle, a.ekpNumber, a.address, a.status, ...a.weaponLines, ...a.transportList].join(' '),
   );
-  // Порциями по экрану
-  const paged = usePaged(list, APPLICATION_CARD_HEIGHT, query);
+  // Лентой карточек или таблицей — выбор запоминается на устройстве
+  const listView = useListView('my-applications', MY_APPLICATION_COLUMNS);
 
   const remove = async (application) => {
     const ok = await confirmAction(`Удалить заявку № ${application.number}? Она будет перенесена в архив.`);
@@ -63,59 +57,42 @@ export function ApplicationsPage({ model, me, sheets, onOpenPage, onMessage }) {
               Здесь появятся ваши заявки на перевозку оружия к соревнованиям
             </EmptyState>
           ) : (
-            <SearchInput value={query} onChange={setQuery} placeholder="№, оружие, соревнование" />
+            <ListToolbar listView={listView}>
+              <SearchInput value={query} onChange={setQuery} placeholder="№, оружие, соревнование" />
+            </ListToolbar>
           )}
           {mine.length > 0 && list.length === 0 && <EmptyState icon="📝" title="Ничего не найдено" />}
 
-          {paged.visible.map((a, i) => (
-            <div key={a.number || i} className="card item-card">
-              <div className="item-head">
-                <div className="item-title">
-                  {a.number && `№ ${a.number} · `}
-                  {a.competitionTitle}
-                </div>
-                {a.status && <Badge tone={STATUS_TONE[a.status] ?? 'neutral'}>{a.status}</Badge>}
-              </div>
-              {a.ekpStart && <div className="item-row">📅 По ЕКП: {formatRange(a.ekpStart, a.ekpEnd)}</div>}
-              {a.address && <div className="item-row">📍 {a.address}</div>}
-              {a.weaponLines.length > 0 && (
-                <ul className="sub-list">
-                  {a.weaponLines.map((l) => (
-                    <li key={l}>🎯 {l}</li>
-                  ))}
-                </ul>
-              )}
-              <div className="item-row">
-                🚚 {formatRange(a.transportStart, a.transportEnd)}
-                {a.transportList.length > 0 && ` · ${a.transportList.join(', ')}`}
-              </div>
-              <div className="item-tags">
-                {a.competitionKind && <Badge>{a.competitionKind}</Badge>}
-                {a.ekpNumber && <Badge>ЕКП № {a.ekpNumber}</Badge>}
-              </div>
-              {a.createdAt && <div className="item-hint">Создана {formatDateTime(a.createdAt)}</div>}
-
-              {/* Менять и удалять можно, пока оформитель не взял заявку в работу; менять — пока соревнование
-                  не началось (иначе скрипт изменение не примет), удалять — и после */}
-              {a.canEdit && (
-                <div className="card-actions">
-                  {isUpcomingCompetition({ start: a.ekpStart }) && (
-                    <button
-                      className="secondary-button"
-                      onClick={() => onOpenPage('application-form', { number: a.number })}
-                      disabled={deleting === a.number}
-                    >
-                      ✏️ Изменить
+          <CardsOrTable
+            listView={listView}
+            items={list}
+            source={mine}
+            rowKey={(a) => a.number}
+            cardHeight={APPLICATION_CARD_HEIGHT}
+            resetKey={query}
+            renderCard={(a) => (
+              <ApplicationCard key={a.number} application={a}>
+                {/* Менять и удалять можно, пока оформитель не взял заявку в работу; менять — пока соревнование
+                    не началось (иначе скрипт изменение не примет), удалять — и после */}
+                {a.canEdit && (
+                  <div className="card-actions">
+                    {isUpcomingCompetition({ start: a.ekpStart }) && (
+                      <button
+                        className="secondary-button"
+                        onClick={() => onOpenPage('application-form', { number: a.number })}
+                        disabled={deleting === a.number}
+                      >
+                        ✏️ Изменить
+                      </button>
+                    )}
+                    <button className="secondary-button danger" onClick={() => remove(a)} disabled={deleting === a.number}>
+                      {deleting === a.number ? 'Удаляем…' : '🗑 Удалить'}
                     </button>
-                  )}
-                  <button className="secondary-button danger" onClick={() => remove(a)} disabled={deleting === a.number}>
-                    {deleting === a.number ? 'Удаляем…' : '🗑 Удалить'}
-                  </button>
-                </div>
-              )}
-            </div>
-          ))}
-          <ShowMore paged={paged} />
+                  </div>
+                )}
+              </ApplicationCard>
+            )}
+          />
         </>
       )}
     </>

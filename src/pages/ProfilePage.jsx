@@ -55,6 +55,7 @@ export function ProfilePage({ model, me, sheets, onOpenPage, onMessage }) {
           {/* Данные получают только подтверждённые спортсмены — другого статуса здесь не бывает */}
           {me.status && <Badge tone="success">{me.status}</Badge>}
           {me.isCarrier && <Badge tone="accent">🚚 Перевозчик</Badge>}
+          {me.isAdmin && <Badge tone="accent">🛠 Администратор</Badge>}
         </div>
         <div className="item-hint">Нашли ошибку в данных — сообщите администратору.</div>
       </div>

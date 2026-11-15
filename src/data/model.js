@@ -38,6 +38,8 @@ export const APPLICATION_STATUS = {
   new: 'Новая',
   inProgress: 'В работе',
   done: 'Выполнена',
+  // Заявку нельзя выполнить — причина в столбце «Причина отклонения»
+  rejected: 'Отклонена',
   archived: 'Архив',
 };
 
@@ -124,6 +126,8 @@ export function buildModel(data) {
       phone: str(r['Телефон']),
       status: str(r['Статус']),
       isCarrier: str(r['Перевозчик']).toLowerCase() === 'да',
+      // Администратор: раздел «Администрирование». Признак виден только в своей строке (и администратору — у всех)
+      isAdmin: str(r['Администратор']).toLowerCase() === 'да',
       // Настройки уведомлений (видны только свои): «Нет» — выключено, пусто или «Да» — включено
       notifyCompetitions: str(r[NOTIFY_COLUMN.competitions]).toLowerCase() !== 'нет',
       notifyApplications: str(r[NOTIFY_COLUMN.applications]).toLowerCase() !== 'нет',
@@ -158,6 +162,8 @@ export function buildModel(data) {
   const applications = rowsOf(data, SHEET.applications)
     .map((r) => ({
       number: str(r['№']),
+      // ФИО перевозчика — автора заявки
+      fullName: str(r['ФИО']),
       transportStart: toDate(r['Сроки перевозки начало']),
       transportEnd: toDate(r['Сроки перевозки окончание']),
       competitionKind: str(r['Вид соревнования']),
@@ -167,6 +173,7 @@ export function buildModel(data) {
       ekpEnd: toDate(r['Сроки по ЕКП окончание']),
       address: str(r['Адрес']),
       status: str(r['Статус']),
+      rejectReason: str(r['Причина отклонения']),
       canEdit: str(r['Статус']) === APPLICATION_STATUS.new,
       // Оружие: строки для показа и разобранные записи «спортсмен → его оружие»; виды транспорта — списком
       weaponLines: textLines(r['Оружие']),

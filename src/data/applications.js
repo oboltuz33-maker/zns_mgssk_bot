@@ -47,13 +47,15 @@ function matchWeapon(model, name, { title, number }) {
 // восстанавливается по тексту: оружие — по номеру, спортсмен — по «Фамилия И.О.» (сначала среди
 // владельцев этого оружия), соревнование — по названию и № ЕКП, транспорт — по названию.
 // problems — то, что распознать не удалось: это нужно выбрать в мастере заново.
-export function draftFromApplication(model, application) {
+// withCompetition: false — соревнование не ищется (администратор правит заявку, не меняя соревнования)
+export function draftFromApplication(model, application, { withCompetition = true } = {}) {
   const problems = [];
 
   const sameTitle = model.competitions.filter((c) => c.title === application.competitionTitle);
-  const competition =
-    sameTitle.find((c) => c.ekpNumber === application.ekpNumber) || (sameTitle.length === 1 ? sameTitle[0] : null);
-  if (!competition) problems.push(`Соревнование «${application.competitionTitle}» не найдено в списке`);
+  const competition = withCompetition
+    ? sameTitle.find((c) => c.ekpNumber === application.ekpNumber) || (sameTitle.length === 1 ? sameTitle[0] : null)
+    : null;
+  if (withCompetition && !competition) problems.push(`Соревнование «${application.competitionTitle}» не найдено в списке`);
 
   const items = [];
   for (const entry of application.weaponEntries) {

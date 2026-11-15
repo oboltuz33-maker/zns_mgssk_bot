@@ -11,8 +11,30 @@ import {
   transportDates,
   weaponLines,
 } from '../src/data/applications.js';
-import { withAthleteFields, withApplicationRow, withWeaponLink, withoutApplication, withoutWeaponLink } from '../src/data/patches.js';
+import {
+  withAthleteFields,
+  withApplicationRow,
+  withSheetRow,
+  withWeaponLink,
+  withoutApplication,
+  withoutAthlete,
+  withoutWeapon,
+  withoutWeaponLink,
+} from '../src/data/patches.js';
 import { fuzzySearch } from '../src/data/search.js';
+import { sortItems, validSort, visibleColumns } from '../src/helpers.js';
+import {
+  adminDraft,
+  adminDraftProblem,
+  competitionDraft,
+  competitionProblem,
+  inEkpPeriod,
+  nextStatuses,
+  sameWeapon,
+  weaponProblem,
+  withCompetition,
+  yesNoValue,
+} from '../src/data/admin.js';
 
 // Данные в том виде, в каком их отдаёт sheets.js: { sheets: { лист: { headers, rows: [{ заголовок: значение }] } } }
 const sheet = (headers, ...rows) => ({
@@ -246,5 +268,164 @@ describe('Нечёткий поиск', () => {
   it('все слова запроса должны совпасть; пустой запрос — весь список с ограничением', () => {
     expect(search('иванов олег')).toEqual([]);
     expect(fuzzySearch(people, '  ', (s) => s, 2)).toEqual(people.slice(0, 2));
+  });
+});
+
+describe('Администрирование', () => {
+  const application = (number) => model.applications.find((a) => a.number === number);
+
+  it('статусы — только вперёд по жизненному циклу', () => {
+    expect(nextStatuses({ status: 'Новая' })).toEqual(['В работе', 'Отклонена']);
+    expect(nextStatuses({ status: 'В работе' })).toEqual(['Выполнена', 'Отклонена']);
+    expect(nextStatuses({ status: 'Отклонена' })).toEqual(['В работе']);
+    expect(nextStatuses({ status: 'Выполнена' })).toEqual([]);
+    expect(nextStatuses({ status: 'Архив' })).toEqual([]);
+  });
+
+  it('период по срокам ЕКП — пересечение; без даты ЕКП в период не входит', () => {
+    const a3 = application('3'); // ЕКП: через 10 дней
+    const day = (offset) => moscowDay(new Date(Date.now() + offset * 86400000));
+    expect(inEkpPeriod(a3, '', '')).toBe(true);
+    expect(inEkpPeriod(a3, day(10), day(10))).toBe(true);
+    expect(inEkpPeriod(a3, day(11), '')).toBe(false);
+    expect(inEkpPeriod(a3, '', day(9))).toBe(false);
+    expect(inEkpPeriod(application('4'), day(0), day(100))).toBe(false);
+  });
+
+  it('черновик правки: соревнование не меняется, пока не выбрано заново; сроки и адрес — из заявки', () => {
+    const { draft, problems } = adminDraft(model, application('3'));
+    expect(draft).toMatchObject({ number: '3', competitionId: '', transportStart: '', address: 'Москва', transport: ['Автомобиль'] });
+    expect(problems.some((p) => p.includes('Соревнование'))).toBe(false);
+    expect(problems.some((p) => p.includes('Дирижабль'))).toBe(true);
+
+    const c1 = model.competitions.find((c) => c.id === 'c1');
+    const changed = withCompetition(draft, c1);
+    expect(changed).toMatchObject({ competitionId: 'c1', address: 'Москва' });
+    expect(changed.transportStart).toBe(moscowDay(new Date(c1.start.getTime() - 86400000)));
+  });
+
+  it('проверка черновика правки', () => {
+    const { draft } = adminDraft(model, application('3'));
+    expect(adminDraftProblem(draft, model)).toBeNull();
+    expect(adminDraftProblem({ ...draft, transport: [] }, model)).toContain('транспорт');
+    expect(adminDraftProblem({ ...draft, transportStart: '2026-12-05', transportEnd: '2026-12-01' }, model)).toContain('раньше');
+  });
+
+  it('модель: признак администратора, статус «Отклонена» с причиной', () => {
+    const source = data();
+    source.sheets['Спортсмены'].headers.push('Администратор');
+    source.sheets['Спортсмены'].rows[0]['Администратор'] = 'да';
+    source.sheets['Заявки'].rows[0]['Статус'] = 'Отклонена';
+    source.sheets['Заявки'].rows[0]['Причина отклонения'] = 'Нет мест';
+    const built = buildModel(source);
+    expect(findMyAthlete(built).isAdmin).toBe(true);
+    expect(built.athletes.find((a) => a.id === 'a2').isAdmin).toBe(false);
+    expect(built.applications.find((a) => a.number === '3')).toMatchObject({ rejectReason: 'Нет мест', canEdit: false });
+  });
+});
+
+describe('Администрирование: спортсмены, соревнования, оружие', () => {
+  it('«Да» / «Нет»: признаки пустым значением выключены, уведомления — включены', () => {
+    expect(yesNoValue('Перевозчик', '')).toBe(false);
+    expect(yesNoValue('Администратор', 'Да')).toBe(true);
+    expect(yesNoValue('Сообщать о заявках', '')).toBe(true);
+    expect(yesNoValue('Сообщать о заявках', 'Нет')).toBe(false);
+  });
+
+  it('пара «Название + Номер» — без учёта регистра и пробелов; номер сам по себе не уникален', () => {
+    expect(sameWeapon(model, ' мр-512 ', '123')?.id).toBe('w1');
+    expect(sameWeapon(model, 'МР-512', '123', 'w1')).toBeUndefined();
+    expect(weaponProblem(model, { id: '', title: 'Benelli', number: '123' })).toBeNull();
+    expect(weaponProblem(model, { id: '', title: 'beretta', number: '123' })).toContain('уже есть');
+    expect(weaponProblem(model, { id: '', title: 'Новое', number: ' ' })).toContain('номер');
+  });
+
+  it('черновик соревнования: даты — «гггг-мм-дд»; проверка названия и порядка дат', () => {
+    const c1 = model.competitions.find((c) => c.id === 'c1');
+    const draft = competitionDraft(c1);
+    expect(draft).toMatchObject({ id: 'c1', title: 'Кубок Москвы', end: '2099-11-12' });
+    expect(competitionProblem(draft)).toBeNull();
+    expect(competitionProblem(competitionDraft(null))).toContain('название');
+    expect(competitionProblem({ ...draft, start: '2099-12-01', end: '2099-11-01' })).toContain('раньше');
+  });
+
+  it('правки на месте: строка листа заменяется по ID; удаление спортсмена и оружия убирает связанные строки', () => {
+    const source = data();
+    const edited = withSheetRow(source, 'Оружие', { Ид: 'w2', Название: 'Benelli M2', Номер: '777' });
+    expect(buildModel(edited).weapons.find((w) => w.id === 'w2').title).toBe('Benelli M2');
+    expect(buildModel(withSheetRow(source, 'Оружие', { Ид: 'w9', Название: 'Новое', Номер: '1' })).weapons).toHaveLength(4);
+
+    const withoutA1 = buildModel(withoutAthlete(source, 'a1'));
+    expect(withoutA1.athletes.map((a) => a.id)).toEqual(['a2', 'a3']);
+    expect(withoutA1.applications).toEqual([]);
+    expect(withoutA1.weapons.find((w) => w.id === 'w1').owners).toEqual([]);
+
+    const withoutW2 = buildModel(withoutWeapon(source, 'w2'));
+    expect(withoutW2.weapons.map((w) => w.id)).toEqual(['w1', 'w3']);
+    expect(withoutW2.athletes.find((a) => a.id === 'a2').weapons).toEqual([]);
+  });
+});
+
+describe('Табличный вид: сортировка и скрытые столбцы', () => {
+  const columns = [
+    { key: 'number', label: '№', type: 'number', value: (a) => a.number },
+    { key: 'title', label: 'Название', value: (a) => a.title },
+    { key: 'date', label: 'Дата', type: 'date', value: (a) => a.date, wide: true },
+  ];
+  const items = [
+    { number: '10', title: 'Бета', date: new Date('2099-03-01') },
+    { number: '2', title: 'альфа', date: null },
+    { number: '', title: 'Ёлка', date: new Date('2099-01-01') },
+    { number: '33', title: '', date: new Date('2099-02-01') },
+  ];
+  const by = (key, dir) => sortItems(items, columns.find((c) => c.key === key), dir);
+
+  it('числа — как числа, текст — по алфавиту без учёта регистра, даты — как даты; пустые — в конце', () => {
+    expect(by('number', 'asc').map((i) => i.number)).toEqual(['2', '10', '33', '']);
+    expect(by('number', 'desc').map((i) => i.number)).toEqual(['33', '10', '2', '']);
+    expect(by('title', 'asc').map((i) => i.title)).toEqual(['альфа', 'Бета', 'Ёлка', '']);
+    expect(by('date', 'asc').map((i) => i.title)).toEqual(['Ёлка', '', 'Бета', 'альфа']);
+    expect(by('date', 'desc').map((i) => i.title)).toEqual(['Бета', '', 'Ёлка', 'альфа']);
+  });
+
+  it('на узком экране столбцы wide скрыты, а сортировка по скрытому столбцу сбрасывается', () => {
+    expect(visibleColumns(columns, true).map((c) => c.key)).toEqual(['number', 'title']);
+    expect(visibleColumns(columns, false)).toHaveLength(3);
+    expect(validSort({ key: 'date', dir: 'asc' }, columns, false)).toEqual({ key: 'date', dir: 'asc' });
+    expect(validSort({ key: 'date', dir: 'asc' }, columns, true)).toBeNull();
+    expect(validSort({ key: 'нет', dir: 'asc' }, columns, false)).toBeNull();
+    expect(validSort({ key: 'title', dir: 'вверх' }, columns, false)).toBeNull();
+  });
+});
+
+describe('Табличный вид: отрисовка', () => {
+  it('таблица — с видимыми столбцами, стрелкой сортировки и строками в порядке сортировки', async () => {
+    // Порция строк считается по высоте окна
+    globalThis.window ??= { innerHeight: 800 };
+    const { createElement } = await import('react');
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const { CardsOrTable } = await import('../src/components.jsx');
+    const { MY_APPLICATION_COLUMNS } = await import('../src/listColumns.jsx');
+    const columns = visibleColumns(MY_APPLICATION_COLUMNS, false);
+    const sortColumn = columns.find((c) => c.key === 'number');
+    const listView = {
+      view: 'table',
+      sort: { key: 'number', dir: 'desc' },
+      columns,
+      cycleSort() {},
+      apply: (items) => sortItems(items, sortColumn, 'desc'),
+    };
+    const html = renderToStaticMarkup(
+      createElement(CardsOrTable, {
+        listView,
+        items: model.applications,
+        rowKey: (a) => a.number,
+        cardHeight: 280,
+        renderCard: () => null,
+      }),
+    );
+    expect(html).toContain('Сроки ЕКП');
+    expect(html).toContain(' ↓');
+    expect(html.indexOf('Поздний кубок')).toBeLessThan(html.indexOf('Кубок Москвы'));
   });
 });

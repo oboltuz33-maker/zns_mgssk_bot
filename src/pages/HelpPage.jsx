@@ -7,6 +7,7 @@ const STATUS_HELP = [
   { status: APPLICATION_STATUS.new, tone: 'accent', text: 'заявка отправлена; пока она в этом статусе, её можно изменить или удалить' },
   { status: APPLICATION_STATUS.inProgress, tone: 'warning', text: 'оформитель взял заявку в работу — изменить её уже нельзя' },
   { status: APPLICATION_STATUS.done, tone: 'success', text: 'перевозка оформлена' },
+  { status: APPLICATION_STATUS.rejected, tone: 'danger', text: 'заявку нельзя выполнить — причина указана в заявке и в сообщении бота' },
   { status: APPLICATION_STATUS.archived, tone: 'muted', text: 'заявка перенесена в архив' },
 ];
 
