@@ -141,6 +141,7 @@ export function AdminApplicationForm({ model, me, params, sheets, onOpenPage, on
         update={update}
         showErrors={attempted}
         recentLabel="Был в заявках автора"
+        anyWeapon
       />
 
       <div className={attempted && !draft.transport.length ? 'card item-card invalid' : 'card item-card'}>

@@ -536,6 +536,12 @@ a {
   padding: 10px 14px;
 }
 
+/* Выбрать нельзя (например, спортсмен без закреплённого оружия) */
+.choice-row:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .choice-row input[type='checkbox'] {
   flex: none;
   width: 20px;

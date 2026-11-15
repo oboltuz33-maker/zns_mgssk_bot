@@ -17,10 +17,10 @@
  *      Создание (без number) или изменение заявки на перевозку. items — [{ athleteId, weaponIds: [...] }],
  *      transport — названия из листа «Виды транспорта». Сроки перевозки скрипт ставит сам по датам
  *      соревнования: за TRANSPORT_DAYS_BEFORE дней до начала и через TRANSPORT_DAYS_AFTER после окончания.
- * POST { action: 'assignWeapon', initData, weaponId }
- *      Закрепить единицу из справочника «Оружие» за собой — строка в листе «Спортсмен/Оружие».
+ *      Оружие — только закреплённое за спортсменом (при изменении — ещё и уже записанное у него в заявке).
  * POST { action: 'unassignWeapon', initData, weaponId }
  *      Открепить единицу от себя — строка удаляется из листа «Спортсмен/Оружие».
+ *      Закрепляет оружие только администратор (adminAssignWeapon).
  * POST { action: 'setNotifications', initData, notifications: { competitions?, applications? } }
  *      Настройки уведомлений перевозчика (true/false) — в его строке «Спортсменов».
  * POST { action: 'deleteApplication', initData, number }
@@ -283,7 +283,6 @@ const WRITES_SHEETS = {
   register: [SHEET.athletes],
   saveApplication: [SHEET.applications],
   deleteApplication: [SHEET.applications],
-  assignWeapon: [SHEET.athleteWeapons],
   unassignWeapon: [SHEET.athleteWeapons],
   setNotifications: [SHEET.athletes],
   adminSetApplicationStatus: [SHEET.applications],
@@ -401,7 +400,8 @@ function runAction_(user, body) {
   if (body.action === 'register') return register_(user, body);
   if (body.action === 'saveApplication') return saveApplication_(user, body.application || {});
   if (body.action === 'deleteApplication') return deleteApplication_(user, body.number);
-  if (body.action === 'assignWeapon') return assignWeapon_(user, body.weaponId);
+  // Прежнее самостоятельное закрепление — у старых версий приложения
+  if (body.action === 'assignWeapon') throw userError_('Закрепить оружие может только администратор');
   if (body.action === 'unassignWeapon') return unassignWeapon_(user, body.weaponId);
   if (body.action === 'setNotifications') return setNotifications_(user, body.notifications || {});
   if (body.action === 'adminSetApplicationStatus') return adminSetApplicationStatus_(user, body);
@@ -675,11 +675,13 @@ function findAthlete_(table, predicate) {
 function saveApplication_(user, input) {
   const ss = spreadsheet_();
   const author = requireCarrier_(ss, user);
-  const fields = buildApplication_(ss, author, input);
   const table = readTable_(ss, SHEET.applications);
+  const own = input.number ? ownNewApplication_(table, input.number, author) : null;
+  const allowed = carrierWeaponCheck_(ss, own ? String(table.get(own, APPLICATION_COLUMN.weapon)) : '');
+  const fields = buildApplication_(ss, author, input, allowed);
 
-  if (input.number) {
-    const fresh = freshOwnNewRow_(table, ownNewApplication_(table, input.number, author), input.number);
+  if (own) {
+    const fresh = freshOwnNewRow_(table, own, input.number);
     const values = writeFields_(table, fresh, fields);
     log_(ss, 'Заявка изменена', user, { athleteId: author.id, text: '№ ' + input.number });
     return { status: 'success', number: Number(input.number), row: rowObject_(table.headers, values) };
@@ -795,8 +797,33 @@ function freshRow_(table, row, id) {
   return { range: range, values: values, formulas: range.getFormulas()[0] };
 }
 
-// Значения столбцов заявки (кроме №, статуса и автора) по выбору перевозчика в приложении
-function buildApplication_(ss, author, input) {
+// Перевозчик выбирает спортсмену только закреплённое за ним оружие (лист «Спортсмен/Оружие»). При изменении заявки
+// можно оставить и единицы, уже записанные у этого спортсмена в заявке (previousWeapons — прежнее значение столбца
+// «Оружие»): раньше их можно было выбрать из всего справочника. function (athlete, weaponId, «Название - Номер») → bool
+function carrierWeaponCheck_(ss, previousWeapons) {
+  const links = readTable_(ss, SHEET.athleteWeapons);
+  const linked = {};
+  links.rows.forEach(function (r) {
+    linked[String(links.get(r, ATHLETE_WEAPON_COLUMN.athleteId)).trim() + '|' + String(links.get(r, ATHLETE_WEAPON_COLUMN.weaponId)).trim()] = true;
+  });
+  // Строки «Фамилия И.О. : Название - Номер ; Название - Номер» → { 'Фамилия И.О.|Название - Номер': true }
+  const previous = {};
+  previousWeapons.split('\n').forEach(function (line) {
+    const at = line.indexOf(ATHLETE_WEAPONS_SEPARATOR.trim());
+    if (at === -1) return;
+    const name = line.slice(0, at).trim();
+    line.slice(at + 1).split(WEAPONS_SEPARATOR.trim()).forEach(function (w) {
+      if (w.trim()) previous[name + '|' + w.trim()] = true;
+    });
+  });
+  return function (athlete, weaponId, text) {
+    return Boolean(linked[athlete.id + '|' + weaponId] || previous[athlete.shortName + '|' + text]);
+  };
+}
+
+// Значения столбцов заявки (кроме №, статуса и автора) по выбору перевозчика в приложении.
+// allowed — какое оружие можно выбрать спортсмену (carrierWeaponCheck_)
+function buildApplication_(ss, author, input, allowed) {
   const competitions = readTable_(ss, SHEET.competitions);
   const competition = findById_(competitions, input.competitionId);
   if (!competition) throw userError_('Соревнование не найдено — обновите данные и выберите заново');
@@ -804,7 +831,7 @@ function buildApplication_(ss, author, input) {
     throw userError_('Соревнование уже началось — заявку на него подать нельзя');
   }
 
-  const fields = applicationContent_(ss, input);
+  const fields = applicationContent_(ss, input, allowed);
   const competitionFields = competitionFields_(competitions, competition);
   Object.keys(competitionFields).forEach(function (column) { fields[column] = competitionFields[column]; });
   fields[APPLICATION_COLUMN.fullName] = author.fullName;
@@ -833,8 +860,9 @@ function competitionFields_(competitions, competition) {
 }
 
 // Столбцы «Оружие» и «Вид транспорта» по выбору из приложения: items — [{ athleteId, weaponIds }],
-// transport — названия из листа «Виды транспорта». Значениям из приложения доверяются только ID и выбор
-function applicationContent_(ss, input) {
+// transport — названия из листа «Виды транспорта». Значениям из приложения доверяются только ID и выбор.
+// allowed — необязательная проверка оружия: function (athlete, weaponId, «Название - Номер») → bool (без неё — любое)
+function applicationContent_(ss, input, allowed) {
   const athletes = athletesTable_(ss);
   const weapons = readTable_(ss, SHEET.weapons);
   const items = Array.isArray(input.items) ? input.items : [];
@@ -856,7 +884,11 @@ function applicationContent_(ss, input) {
     const athleteWeapons = weaponIds.map(function (weaponId) {
       const weapon = findById_(weapons, weaponId);
       if (!weapon) throw userError_('Оружие не найдено — обновите данные и выберите заново');
-      return String(weapons.get(weapon, WEAPON_COLUMN.title)).trim() + ' - ' + String(weapons.get(weapon, WEAPON_COLUMN.number)).trim();
+      const text = String(weapons.get(weapon, WEAPON_COLUMN.title)).trim() + ' - ' + String(weapons.get(weapon, WEAPON_COLUMN.number)).trim();
+      if (allowed && !allowed(athlete, weaponId, text)) {
+        throw userError_(text + ' не закреплено за спортсменом ' + athlete.shortName + ' — закрепить оружие может администратор');
+      }
+      return text;
     });
     weaponLines.push(athlete.shortName + ATHLETE_WEAPONS_SEPARATOR + athleteWeapons.join(WEAPONS_SEPARATOR));
   });
@@ -887,17 +919,6 @@ function nextApplicationNumber_(ss, table) {
 }
 
 // ---------- Закрепление оружия ----------
-
-// Подтверждённый спортсмен закрепляет за собой единицу из справочника «Оружие».
-// Одна единица может быть закреплена за несколькими спортсменами.
-function assignWeapon_(user, weaponId) {
-  const ss = spreadsheet_();
-  const athlete = requireConfirmed_(ss, user);
-  const result = linkWeapon_(ss, athlete.id, weaponId);
-  if (result.already) return { status: 'success', message: result.title + ' уже закреплено за вами', link: result.link };
-  log_(ss, 'Оружие закреплено', user, { athleteId: athlete.id, text: result.title });
-  return { status: 'success', message: result.title + ' закреплено за вами', link: result.link };
-}
 
 // Спортсмен открепляет от себя единицу оружия: удаляются его строки с этой единицей в «Спортсмен/Оружие».
 // На уже поданные заявки не влияет — в них оружие записано текстом.

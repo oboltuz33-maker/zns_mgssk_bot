@@ -45,6 +45,7 @@ const fixture = () => ({
   'Спортсмен/Оружие': [
     ['Спортсмен ид', 'Оружие ид'],
     ['a1', 'w1'],
+    ['a2', 'w2'],
   ],
   Заявки: [
     APPLICATION_HEADERS,
@@ -144,9 +145,9 @@ describe('Отдача листов приложению', () => {
 
   it('загрузка не запоминается по requestId — повтор отдаёт свежие данные', () => {
     load(IVANOV, { requestId: 'same' });
-    post(IVANOV, 'assignWeapon', { weaponId: 'w2' });
+    post(IVANOV, 'unassignWeapon', { weaponId: 'w1' });
     const links = load(IVANOV, { requestId: 'same' }).sheets['Спортсмен/Оружие'].rows;
-    expect(links).toHaveLength(2);
+    expect(links).toHaveLength(1);
   });
 
   it('видит запись через приложение сразу, несмотря на кэш', () => {
@@ -200,6 +201,13 @@ describe('Создание заявки', () => {
     expect(gas.sheet('Заявки').objects()).toHaveLength(3);
   });
 
+  it('оружие — только закреплённое за спортсменом', () => {
+    const items = [{ athleteId: 'a1', weaponIds: ['w1', 'w2'] }];
+    const result = post(IVANOV, 'saveApplication', { application: { ...newApplication, items } });
+    expect(result.message).toBe('Benelli - 777 не закреплено за спортсменом Иванов И.И. — закрепить оружие может администратор');
+    expect(gas.sheet('Заявки').objects()).toHaveLength(3);
+  });
+
   it('одна и та же единица оружия, переданная дважды, записывается один раз', () => {
     const items = [{ athleteId: 'a1', weaponIds: ['w1', 'w1'] }];
     post(IVANOV, 'saveApplication', { application: { ...newApplication, items } });
@@ -226,6 +234,17 @@ describe('Изменение и удаление заявки', () => {
     expect(sheet.values[1][5]).toBe('Поезд');
     expect(sheet.formulas[1][15]).toBe('=1+1');
     expect(sheet.values[1][12]).toBe('Новая');
+  });
+
+  it('оружие, уже записанное у спортсмена в заявке, можно оставить и без закрепления; новое — нет', () => {
+    post(IVANOV, 'unassignWeapon', { weaponId: 'w1' });
+    const kept = { ...edit, items: [{ athleteId: 'a1', weaponIds: ['w1'] }] };
+    expect(post(IVANOV, 'saveApplication', { application: kept }).status).toBe('success');
+    const added = { ...edit, items: [{ athleteId: 'a1', weaponIds: ['w1', 'w2'] }] };
+    expect(post(IVANOV, 'saveApplication', { application: added }).message).toContain('Benelli - 777 не закреплено');
+    // Прежнее оружие одного спортсмена не переходит к другому
+    const other = { ...edit, items: [{ athleteId: 'a2', weaponIds: ['w1'] }] };
+    expect(post(IVANOV, 'saveApplication', { application: other }).message).toContain('МР-512 - 123 не закреплено');
   });
 
   it('не меняет чужую и уже взятую в работу заявку', () => {
@@ -301,8 +320,8 @@ describe('Доступ по телефону и по ФИО', () => {
 });
 
 describe('Закрепление оружия и настройки', () => {
-  it('закрепляет и открепляет', () => {
-    expect(post(PETROV, 'assignWeapon', { weaponId: 'w2' }).link).toEqual({ athleteId: 'a2', weaponId: 'w2' });
+  it('закрепить за собой нельзя (только администратор), открепить от себя — можно', () => {
+    expect(post(IVANOV, 'assignWeapon', { weaponId: 'w2' }).message).toContain('только администратор');
     expect(gas.sheet('Спортсмен/Оружие').objects()).toHaveLength(2);
     expect(post(PETROV, 'unassignWeapon', { weaponId: 'w2' }).status).toBe('success');
     expect(gas.sheet('Спортсмен/Оружие').objects()).toEqual([{ 'Спортсмен ид': 'a1', 'Оружие ид': 'w1' }]);
@@ -425,7 +444,8 @@ describe('Администрирование', () => {
   it('правка заявки: участники, транспорт, сроки, адрес; ФИО, статус и прочие столбцы не меняются', () => {
     const application = {
       number: 5,
-      items: [{ athleteId: 'a2', weaponIds: ['w2'] }],
+      // Администратору можно и незакреплённое оружие (у Кузнецова закреплений нет)
+      items: [{ athleteId: 'a2', weaponIds: ['w2'] }, { athleteId: 'a4', weaponIds: ['w1'] }],
       transport: ['Поезд'],
       transportStart: isoDay(3),
       transportEnd: isoDay(4),
@@ -435,7 +455,7 @@ describe('Администрирование', () => {
     expect(result.status).toBe('success');
     expect(appRow(5)).toMatchObject({
       ФИО: 'ФИО',
-      Оружие: 'Петров П. : Benelli - 777',
+      Оружие: 'Петров П. : Benelli - 777\nКузнецов К. : МР-512 - 123',
       'Вид транспорта': 'Поезд',
       'Сроки перевозки начало': day(3),
       'Сроки перевозки окончание': day(4),
@@ -529,7 +549,7 @@ describe('Администрирование: спортсмены', () => {
     const result = post(PETROV, 'adminDeleteAthlete', { athleteId: 'a1' });
     expect(result).toMatchObject({ status: 'success', applications: ['5', '7'], links: 1 });
     expect(athleteRow('a1')).toBeUndefined();
-    expect(gas.sheet('Спортсмен/Оружие').objects()).toEqual([]);
+    expect(gas.sheet('Спортсмен/Оружие').objects()).toEqual([{ 'Спортсмен ид': 'a2', 'Оружие ид': 'w2' }]);
     expect(gas.sheet('Заявки').objects().map((r) => r['№'])).toEqual([6]);
     const archived = gas.sheet('Архив заявок').objects();
     expect(archived.map((r) => [r['№'], r['Статус']])).toEqual([[9, 'Архив'], [5, 'Новая'], [7, 'В работе']]);
@@ -626,7 +646,7 @@ describe('Администрирование: оружие', () => {
   it('удаление единицы удаляет и её закрепления', () => {
     expect(post(PETROV, 'adminDeleteWeapon', { weaponId: 'w1' })).toMatchObject({ status: 'success', links: 1 });
     expect(weapons().map((w) => w['Ид'])).toEqual(['w2']);
-    expect(links()).toEqual([]);
+    expect(links()).toEqual([{ 'Спортсмен ид': 'a2', 'Оружие ид': 'w2' }]);
   });
 
   it('закрепление за любым спортсменом; новая единица заводится в справочнике, существующая пара — берётся она', () => {

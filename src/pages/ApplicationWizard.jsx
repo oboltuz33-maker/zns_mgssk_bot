@@ -383,8 +383,9 @@ const MIN_QUERY = 3; // поиск спортсменов — от стольк�
 
 // Участники и их оружие на одном экране: каждый добавленный спортсмен — карточка с выбором оружия.
 // me — перевозчик, чьи прошлые заявки подсказывают участников (у администратора — автор заявки);
-// recentLabel — пометка у таких участников
-export function ParticipantsStep({ draft, model, me, update, showErrors, recentLabel = 'Был в ваших заявках' }) {
+// recentLabel — пометка у таких участников. Перевозчик выбирает спортсмену только закреплённое за ним оружие
+// (спортсмена без оружия добавить нельзя); anyWeapon — администратор: любое из справочника
+export function ParticipantsStep({ draft, model, me, update, showErrors, recentLabel = 'Был в ваших заявках', anyWeapon = false }) {
   const [query, setQuery] = useState('');
   const selectedIds = draft.items.map((i) => i.athleteId);
 
@@ -429,6 +430,7 @@ export function ParticipantsStep({ draft, model, me, update, showErrors, recentL
           onRemove={() => remove(item.athleteId)}
           onWeapons={(weaponIds) => setWeapons(item.athleteId, weaponIds)}
           showErrors={showErrors}
+          anyWeapon={anyWeapon}
         />
       ))}
 
@@ -438,18 +440,25 @@ export function ParticipantsStep({ draft, model, me, update, showErrors, recentL
       {!trimmed && list.length > 0 && <p className="sheet-meta">Остальных спортсменов найдите поиском</p>}
       {list.length > 0 && (
         <div className="list">
-          {paged.visible.map((a) => (
-            <button key={a.id} className="list-item choice-row" onClick={() => add(a)}>
-              <span className="add-mark">＋</span>
-              <div className="list-text">
-                <div className="item-title">{a.fullName}</div>
-                <div className="item-hint">
-                  {!searching && `${recentLabel} · `}
-                  {a.weapons.length ? `🎯 ${a.weapons.map((w) => w.title).join(', ')}` : 'Оружие не закреплено'}
+          {paged.visible.map((a) => {
+            const blocked = !anyWeapon && !a.weapons.length;
+            return (
+              <button key={a.id} className="list-item choice-row" onClick={() => add(a)} disabled={blocked}>
+                <span className="add-mark">＋</span>
+                <div className="list-text">
+                  <div className="item-title">{a.fullName}</div>
+                  <div className="item-hint">
+                    {!searching && `${recentLabel} · `}
+                    {a.weapons.length
+                      ? `🎯 ${a.weapons.map((w) => w.title).join(', ')}`
+                      : blocked
+                        ? 'Оружие не закреплено — обратитесь к администратору'
+                        : 'Оружие не закреплено'}
+                  </div>
                 </div>
-              </div>
-            </button>
-          ))}
+              </button>
+            );
+          })}
         </div>
       )}
       <ShowMore paged={paged} />
@@ -457,15 +466,20 @@ export function ParticipantsStep({ draft, model, me, update, showErrors, recentL
   );
 }
 
-// Участник заявки: его оружие — плашками (нажатие выбирает или снимает), «＋ Добавить» — выбор из справочника
-function ParticipantCard({ item, model, onRemove, onWeapons, showErrors }) {
+// Участник заявки: его оружие — плашками (нажатие выбирает или снимает). Перевозчику — закреплённое за спортсменом
+// и уже стоявшее в заявке (раньше его можно было взять из всего справочника; снятое остаётся плашкой до ухода с экрана).
+// anyWeapon — администратор: ещё и «＋ Добавить» из справочника
+function ParticipantCard({ item, model, onRemove, onWeapons, showErrors, anyWeapon }) {
   const [picking, setPicking] = useState(false);
+  const [initialIds] = useState(item.weaponIds);
   const athlete = model.athletes.find((a) => a.id === item.athleteId);
   const linked = athlete?.weapons ?? [];
-  // Закреплённое + выбранное из общего справочника
-  const shown = [...linked, ...model.weapons.filter((w) => item.weaponIds.includes(w.id) && !linked.includes(w))];
+  const extraIds = anyWeapon ? item.weaponIds : [...new Set([...initialIds, ...item.weaponIds])];
+  const extra = model.weapons.filter((w) => extraIds.includes(w.id) && !linked.includes(w));
+  const shown = [...linked, ...extra];
   const toggle = (id) => onWeapons(item.weaponIds.includes(id) ? item.weaponIds.filter((w) => w !== id) : [...item.weaponIds, id]);
   const invalid = showErrors && !item.weaponIds.length;
+  const noWeapons = !anyWeapon && !shown.length;
 
   return (
     <div className={invalid ? 'card item-card invalid' : 'card item-card'}>
@@ -475,7 +489,13 @@ function ParticipantCard({ item, model, onRemove, onWeapons, showErrors }) {
           ✕
         </button>
       </div>
-      {invalid && <div className="invalid-text">Выберите хотя бы одну единицу оружия</div>}
+      {noWeapons ? (
+        <div className={invalid ? 'invalid-text' : 'item-hint'}>
+          Оружие не закреплено — обратитесь к администратору или уберите спортсмена из заявки
+        </div>
+      ) : (
+        invalid && <div className="invalid-text">Выберите хотя бы одну единицу оружия</div>
+      )}
       <div className="weapon-chips">
         {shown.map((w) => {
           const selected = item.weaponIds.includes(w.id);
@@ -483,12 +503,15 @@ function ParticipantCard({ item, model, onRemove, onWeapons, showErrors }) {
             <button key={w.id} className={selected ? 'weapon-chip selected' : 'weapon-chip'} onClick={() => toggle(w.id)}>
               {selected && '✓ '}
               {w.title} <span className="weapon-chip-number">{w.number}</span>
+              {!anyWeapon && extra.includes(w) && <span className="weapon-chip-number"> · не закреплено</span>}
             </button>
           );
         })}
-        <button className="weapon-chip add" onClick={() => setPicking(true)}>
-          ＋ Добавить
-        </button>
+        {anyWeapon && (
+          <button className="weapon-chip add" onClick={() => setPicking(true)}>
+            ＋ Добавить
+          </button>
+        )}
       </div>
       {picking && (
         <WeaponPicker
