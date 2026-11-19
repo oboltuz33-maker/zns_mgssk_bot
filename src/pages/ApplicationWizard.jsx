@@ -4,6 +4,8 @@ import {
   WIZARD_STEPS,
   applicationsForCompetition,
   clearSavedDraft,
+  competitionDays,
+  defaultTransportDate,
   defaultWeaponIds,
   draftFromApplication,
   loadSavedDraft,
@@ -12,6 +14,7 @@ import {
   saveApplication,
   saveDraftLocally,
   stepProblem,
+  transportDateProblem,
   transportDates,
   weaponLines,
 } from '../data/applications.js';
@@ -342,7 +345,8 @@ function CompetitionStep({ draft, model, me, update, next }) {
   const tap = (c) => {
     const now = Date.now();
     if (lastTap.id === c.id && now - lastTap.at < DOUBLE_TAP_MS) next();
-    else update({ competitionId: c.id });
+    // Дата перевозки прежнего соревнования к новому не подходит — выбирается заново
+    else if (c.id !== draft.competitionId) update({ competitionId: c.id, transportDate: defaultTransportDate(c) });
     setLastTap({ id: c.id, at: now });
   };
 
@@ -366,6 +370,7 @@ function CompetitionStep({ draft, model, me, update, next }) {
             <div className="item-tags">
               {c.kind && <Badge>{c.kind}</Badge>}
               {c.ekpNumber && <Badge>ЕКП № {c.ekpNumber}</Badge>}
+              {c.oneDay && <Badge tone="accent">Одним днём</Badge>}
               {existing.map((a) => (
                 <Badge key={a.number} tone="warning">
                   Уже есть заявка № {a.number}
@@ -564,11 +569,13 @@ export function WeaponPicker({ title, weapons, onPick, onClose }) {
   );
 }
 
-// Проверка: всё, что уйдёт в таблицу, с кнопками «Изменить» у каждого блока; транспорт выбирается здесь же
+// Проверка: всё, что уйдёт в таблицу, с кнопками «Изменить» у каждого блока; транспорт выбирается здесь же,
+// а у соревнования «Выезд одним днём» — ещё и обязательная дата перевозки
 function ReviewStep({ draft, model, update, edit, showErrors }) {
   const competition = model.competitions.find((c) => c.id === draft.competitionId);
   const lines = weaponLines(draft, model);
-  const dates = transportDates(competition);
+  const dates = transportDates(competition, draft.transportDate);
+  const oneDay = Boolean(competition?.oneDay && competition.start);
   const toggleTransport = (name) =>
     update({ transport: draft.transport.includes(name) ? draft.transport.filter((t) => t !== name) : [...draft.transport, name] });
 
@@ -600,7 +607,13 @@ function ReviewStep({ draft, model, update, edit, showErrors }) {
         </ul>
       </div>
 
-      <div className={showErrors && !draft.transport.length ? 'card item-card invalid' : 'card item-card'}>
+      <div
+        className={
+          showErrors && (!draft.transport.length || (oneDay && transportDateProblem(draft, model)))
+            ? 'card item-card invalid'
+            : 'card item-card'
+        }
+      >
         <div className="section-label">Транспорт</div>
         {model.transportTypes.length === 0 ? (
           <p className="sheet-error">Справочник «Виды транспорта» пуст — обратитесь к администратору</p>
@@ -618,7 +631,9 @@ function ReviewStep({ draft, model, update, edit, showErrors }) {
             ))}
           </div>
         )}
-        {dates.start ? (
+        {oneDay ? (
+          <TransportDatePicker competition={competition} draft={draft} update={update} showErrors={showErrors} model={model} />
+        ) : dates.start ? (
           <>
             <div className="item-row">📅 Сроки перевозки: {formatRange(dates.start, dates.end)}</div>
             <div className="item-hint">За день до начала соревнования и через день после окончания</div>
@@ -627,6 +642,57 @@ function ReviewStep({ draft, model, update, edit, showErrors }) {
           <div className="item-hint">📅 У соревнования не указана дата — сроки перевозки заполнит оформитель</div>
         )}
       </div>
+    </>
+  );
+}
+
+const WEEKDAY = { weekday: 'short', timeZone: 'Europe/Moscow' };
+// Подпись дня для выбора: «пт, 12.12»
+const dayLabel = (day) => {
+  const weekday = new Date(`${day}T12:00:00+03:00`).toLocaleDateString('ru-RU', WEEKDAY);
+  return `${weekday}, ${day.slice(8, 10)}.${day.slice(5, 7)}`;
+};
+
+// Дата перевозки на соревнование «Выезд одним днём»: плашки по дням периода соревнования (выбор обязателен)
+// и кнопка «?» с пояснением, зачем её выбирать
+function TransportDatePicker({ competition, draft, update, showErrors, model }) {
+  const [explain, setExplain] = useState(false);
+  const days = competitionDays(competition);
+  const problem = transportDateProblem(draft, model);
+
+  return (
+    <>
+      <div className="item-head transport-date-head">
+        <div className="section-label">Дата перевозки *</div>
+        <button
+          className={explain ? 'hint-toggle active' : 'hint-toggle'}
+          onClick={() => setExplain((v) => !v)}
+          aria-label="Почему нужно выбрать дату"
+          aria-expanded={explain}
+        >
+          ?
+        </button>
+      </div>
+      {explain && (
+        <div className="item-hint hint-text">
+          На это соревнование едут одним днём: перевозка туда и обратно — в один день. Выберите день из периода
+          соревнования ({formatCompetitionDates(competition)}) — он будет записан в заявку как начало и окончание сроков
+          перевозки. Без даты заявку отправить нельзя.
+        </div>
+      )}
+      <div className="item-tags">
+        {days.map((day) => (
+          <button
+            key={day}
+            className={draft.transportDate === day ? 'sheet-tab active' : 'sheet-tab'}
+            onClick={() => update({ transportDate: day })}
+          >
+            {draft.transportDate === day && '✓ '}
+            {dayLabel(day)}
+          </button>
+        ))}
+      </div>
+      {problem && showErrors && <div className="invalid-text">{problem}</div>}
     </>
   );
 }

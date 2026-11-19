@@ -67,6 +67,7 @@ export function AdminCompetitions({ model, onOpenPage }) {
             <div className="item-tags">
               {c.kind && <Badge>{c.kind}</Badge>}
               {c.ekpNumber && <Badge>ЕКП № {c.ekpNumber}</Badge>}
+              {c.oneDay && <Badge tone="accent">Одним днём</Badge>}
             </div>
             <div className="card-actions">
               <button className="secondary-button" onClick={() => onOpenPage('admin-competition', { id: c.id })}>
@@ -168,6 +169,15 @@ export function AdminCompetitionForm({ model, me, sheets, params, onOpenPage, on
           {field('end', 'Дата завершения', { type: 'date' })}
         </div>
         {field('address', 'Адрес', { maxLength: 300 })}
+        <label className="switch-row">
+          <span>Выезд одним днём</span>
+          <input type="checkbox" className="switch" checked={draft.oneDay} onChange={() => update('oneDay', !draft.oneDay)} />
+        </label>
+        {draft.oneDay && (
+          <div className={attempted && !draft.start ? 'invalid-text' : 'item-hint'}>
+            Перевозчик выберет в заявке день перевозки из периода соревнования — он запишется в сроки перевозки
+          </div>
+        )}
       </div>
       <div className="item-hint">
         {competition

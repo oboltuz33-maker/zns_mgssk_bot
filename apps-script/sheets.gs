@@ -13,10 +13,11 @@
  * POST { action: 'register', initData, lastName, firstName, middleName, contact }
  *      Заявка на доступ по ФИО, если номер (contact обязателен) не найден в списке, —
  *      строка со статусом «Требует подтверждения».
- * POST { action: 'saveApplication', initData, application: { number?, competitionId, items, transport } }
+ * POST { action: 'saveApplication', initData, application: { number?, competitionId, items, transport, transportDate? } }
  *      Создание (без number) или изменение заявки на перевозку. items — [{ athleteId, weaponIds: [...] }],
  *      transport — названия из листа «Виды транспорта». Сроки перевозки скрипт ставит сам по датам
  *      соревнования: за TRANSPORT_DAYS_BEFORE дней до начала и через TRANSPORT_DAYS_AFTER после окончания.
+ *      У соревнования «Выезд одним днём» сроки — transportDate («гггг-мм-дд», обязательна, в период соревнования).
  *      Оружие — только закреплённое за спортсменом (при изменении — ещё и уже записанное у него в заявке).
  * POST { action: 'unassignWeapon', initData, weaponId }
  *      Администратор открепляет единицу от себя — строка удаляется из листа «Спортсмен/Оружие».
@@ -40,7 +41,8 @@
  *      Правка спортсмена (кроме ID, телефона и ChatId), в том числе подтверждение (Статус = «Подтвержден»).
  * POST { action: 'adminDeleteAthlete', initData, athleteId }
  *      Удаление спортсмена: его закрепления удаляются, его заявки переносятся в «Архив заявок» с прежним статусом.
- * POST { action: 'adminSaveCompetition', initData, competition: { id?, title, ekpNumber, kind, start, end, address } }
+ * POST { action: 'adminSaveCompetition', initData, competition: { id?, title, ekpNumber, kind, start, end, address,
+ *      oneDay } }
  *      Создание (без id) или правка соревнования; рассылка перевозчикам — по тем же правилам, что у триггера.
  * POST { action: 'adminSaveWeapon', initData, weapon: { id?, title, number } }
  *      Создание или правка единицы справочника «Оружие»; пара «Название + Номер» уникальна.
@@ -160,6 +162,8 @@ const COMPETITION_COLUMN = {
   start: 'Дата начала',
   end: 'Дата завершения',
   address: 'Адрес',
+  // «Да» — едут одним днём: перевозчик выбирает в заявке дату перевозки из периода соревнования (необязательный столбец)
+  oneDay: 'Выезд одним днём',
   // Когда перевозчикам разослано сообщение о новом соревновании (ставит скрипт). Пусто — ещё не рассылалось;
   // очистить ячейку — разослать заново; вписать что угодно (например, «нет») — не рассылать
   notified: 'Рассылка',
@@ -909,7 +913,7 @@ function buildApplication_(ss, author, input, allowed) {
   }
 
   const fields = applicationContent_(ss, input, allowed, author.id);
-  const competitionFields = competitionFields_(competitions, competition);
+  const competitionFields = competitionFields_(competitions, competition, input.transportDate || '');
   Object.keys(competitionFields).forEach(function (column) { fields[column] = competitionFields[column]; });
   fields[APPLICATION_COLUMN.fullName] = author.fullName;
   return fields;
@@ -917,16 +921,24 @@ function buildApplication_(ss, author, input, allowed) {
 
 // Столбцы заявки из соревнования: вид, название, № ЕКП, сроки по ЕКП, адрес и сроки перевозки — от дат соревнования.
 // Если дата начала не указана или записана неверно, сроки перевозки остаются пустыми (их заполнит оформитель),
-// а в «Сроки по ЕКП» переносится то, что записано в ячейках
-function competitionFields_(competitions, competition) {
+// а в «Сроки по ЕКП» переносится то, что записано в ячейках.
+// Соревнование «Выезд одним днём»: обе даты сроков перевозки — transportDate («гггг-мм-дд» из приложения), она
+// обязательна и должна быть в период соревнования. Без transportDate (правка администратором) — ставится дата начала
+function competitionFields_(competitions, competition, transportDate) {
   const rawStart = competitions.get(competition, COMPETITION_COLUMN.start);
   const rawEnd = competitions.get(competition, COMPETITION_COLUMN.end);
   const competitionStart = sheetDate_(rawStart);
   const competitionEnd = sheetDate_(rawEnd) || competitionStart;
 
   const fields = {};
-  fields[APPLICATION_COLUMN.transportStart] = competitionStart ? shiftDays_(competitionStart, -TRANSPORT_DAYS_BEFORE) : '';
-  fields[APPLICATION_COLUMN.transportEnd] = competitionEnd ? shiftDays_(competitionEnd, TRANSPORT_DAYS_AFTER) : '';
+  if (isOneDay_(competitions, competition) && competitionStart) {
+    const day = transportDate === undefined ? shiftDays_(competitionStart, 0) : oneDayTransportDate_(transportDate, competitionStart, competitionEnd);
+    fields[APPLICATION_COLUMN.transportStart] = day;
+    fields[APPLICATION_COLUMN.transportEnd] = day;
+  } else {
+    fields[APPLICATION_COLUMN.transportStart] = competitionStart ? shiftDays_(competitionStart, -TRANSPORT_DAYS_BEFORE) : '';
+    fields[APPLICATION_COLUMN.transportEnd] = competitionEnd ? shiftDays_(competitionEnd, TRANSPORT_DAYS_AFTER) : '';
+  }
   fields[APPLICATION_COLUMN.competitionKind] = competitions.get(competition, COMPETITION_COLUMN.kind);
   fields[APPLICATION_COLUMN.competitionTitle] = competitions.get(competition, COMPETITION_COLUMN.title);
   fields[APPLICATION_COLUMN.ekpNumber] = competitions.get(competition, COMPETITION_COLUMN.ekpNumber);
@@ -934,6 +946,26 @@ function competitionFields_(competitions, competition) {
   fields[APPLICATION_COLUMN.ekpEnd] = sheetDate_(rawEnd) || rawEnd;
   fields[APPLICATION_COLUMN.address] = competitions.get(competition, COMPETITION_COLUMN.address);
   return fields;
+}
+
+// Соревнование с «Да» в столбце «Выезд одним днём»
+function isOneDay_(competitions, competition) {
+  return competitions.headers.indexOf(COMPETITION_COLUMN.oneDay) !== -1 &&
+    String(competitions.get(competition, COMPETITION_COLUMN.oneDay)).trim().toLowerCase() === 'да';
+}
+
+// Дата перевозки на соревнование «одним днём»: «гггг-мм-дд» → дата, обязательна и в период [start; end] по дням
+function oneDayTransportDate_(value, start, end) {
+  const date = inputDate_(value, 'Дата перевозки');
+  if (!date) throw userError_('Выберите дату перевозки — на это соревнование едут одним днём');
+  const from = shiftDays_(start, 0);
+  const to = shiftDays_(end || start, 0);
+  if (date < from || date > to) {
+    const tz = Session.getScriptTimeZone();
+    const format = function (d) { return Utilities.formatDate(d, tz, 'dd.MM.yyyy'); };
+    throw userError_('Дата перевозки должна быть в период соревнования (' + format(from) + ' – ' + format(to) + ')');
+  }
+  return date;
 }
 
 // Столбцы «Оружие», «ID участников» и «Вид транспорта» по выбору из приложения: items — [{ athleteId, weaponIds }],
@@ -1426,6 +1458,11 @@ function adminSaveCompetition_(user, input) {
   fields[COMPETITION_COLUMN.end] = inputDate_(input.end, 'Дата завершения');
   if (fields[COMPETITION_COLUMN.start] && fields[COMPETITION_COLUMN.end] && fields[COMPETITION_COLUMN.start] > fields[COMPETITION_COLUMN.end]) {
     throw userError_('Дата завершения раньше даты начала');
+  }
+  // «Выезд одним днём» — необязательный столбец: без него на листе признак не ставится
+  if (input.oneDay && !fields[COMPETITION_COLUMN.start]) throw userError_('Для выезда одним днём укажите даты соревнования');
+  if (input.oneDay || table.headers.indexOf(COMPETITION_COLUMN.oneDay) !== -1) {
+    fields[COMPETITION_COLUMN.oneDay] = input.oneDay ? 'Да' : '';
   }
   Object.keys(fields).forEach(function (column) {
     if (table.headers.indexOf(column) === -1) throw userError_('Нет столбца «' + column + '» на листе «' + SHEET.competitions + '»');

@@ -50,9 +50,12 @@ export function adminDraft(model, application) {
   };
 }
 
-// Соревнование выбрано заново: сроки перевозки и адрес — по нему (администратор может поправить)
+// Соревнование выбрано заново: сроки перевозки и адрес — по нему (администратор может поправить).
+// Выезд одним днём — обе даты перевозки по дате начала
 export function withCompetition(draft, competition) {
-  const dates = transportDates(competition);
+  const dates = competition.oneDay && competition.start
+    ? { start: competition.start, end: competition.start }
+    : transportDates(competition);
   return {
     ...draft,
     competitionId: competition.id,
@@ -140,11 +143,13 @@ export const competitionDraft = (competition) => ({
   start: dayOrEmpty(competition?.start),
   end: dayOrEmpty(competition?.end),
   address: competition?.address ?? '',
+  oneDay: competition?.oneDay ?? false,
 });
 
 export function competitionProblem(draft) {
   if (!draft.title.trim()) return 'Укажите название соревнования';
   if (draft.start && draft.end && draft.start > draft.end) return 'Дата завершения раньше даты начала';
+  if (draft.oneDay && !draft.start) return 'Для выезда одним днём укажите даты соревнования';
   return null;
 }
 

@@ -577,6 +577,39 @@ a {
   cursor: pointer;
 }
 
+/* Маленький «?» в строке: раскрывает пояснение под заголовком (дата перевозки в мастере) */
+.transport-date-head {
+  justify-content: flex-start;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.hint-toggle {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(127, 127, 127, 0.3);
+  background: var(--secondary-bg);
+  color: var(--hint);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.hint-toggle.active {
+  background: var(--tg-theme-button-color, #0088cc);
+  border-color: transparent;
+  color: var(--tg-theme-button-text-color, #fff);
+}
+
+.hint-text {
+  margin-bottom: 8px;
+}
+
 /* Мастер: убрать участника, «Изменить» на проверке, «＋» у добавляемого */
 .icon-button {
   flex: none;

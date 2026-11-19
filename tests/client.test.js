@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { buildModel, findMyAthlete, isUpcomingCompetition, moscowDay, notificationSettingsFor } from '../src/data/model.js';
 import {
   applicationsForCompetition,
+  competitionDays,
+  defaultTransportDate,
   draftFromApplication,
   loadSavedDraft,
   newDraft,
@@ -176,6 +178,7 @@ describe('Черновик заявки', () => {
       competitionId: 'c1',
       items: [{ athleteId: 'a1', weaponIds: ['w1'] }],
       transport: ['Автомобиль'],
+      transportDate: '',
     });
     expect(newDraft(model, me, 'нет-такого').competitionId).toBe('');
   });
@@ -190,6 +193,7 @@ describe('Черновик заявки', () => {
         { athleteId: 'a2', weaponIds: ['w2'] },
       ],
       transport: ['Автомобиль'],
+      transportDate: '',
     });
     expect(problems).toEqual(['Не распознано: «Петров П. : Дробовик - 000»', 'Вида транспорта «Дирижабль» нет в справочнике']);
   });
@@ -218,6 +222,67 @@ describe('Черновик заявки', () => {
     expect(moscowDay(start)).toBe(moscowDay(new Date(competition.start.getTime() - 86400000)));
     expect(moscowDay(end)).toBe('2099-11-13');
     expect(transportDates(model.competitions[2])).toEqual({ start: null, end: null });
+  });
+
+  describe('выезд одним днём', () => {
+    // «Поздний кубок» (c2, два дня) — одним днём
+    const oneDayModel = (mutate = () => {}) => {
+      const source = data();
+      source.sheets['Соревнования'].headers.push('Выезд одним днём');
+      source.sheets['Соревнования'].rows[0]['Выезд одним днём'] = 'Да';
+      mutate(source);
+      return buildModel(source);
+    };
+    const dayOf = (offset) => moscowDay(new Date(moscowMidnight(offset)));
+
+    it('признак и дни соревнования', () => {
+      const m = oneDayModel();
+      const c2 = m.competitions.find((c) => c.id === 'c2');
+      expect(c2.oneDay).toBe(true);
+      expect(m.competitions.find((c) => c.id === 'c1').oneDay).toBe(false);
+      expect(competitionDays(c2)).toEqual([dayOf(30), dayOf(31)]);
+      expect(competitionDays(m.competitions.find((c) => c.id === 'c3'))).toEqual([]);
+      // Период из двух дней — дата сразу не выбирается, из одного — выбирается
+      expect(defaultTransportDate(c2)).toBe('');
+      expect(defaultTransportDate({ ...c2, end: c2.start })).toBe(dayOf(30));
+      expect(defaultTransportDate(m.competitions.find((c) => c.id === 'c1'))).toBe('');
+    });
+
+    it('проверка: дата обязательна и в периоде соревнования; сроки — выбранная дата', () => {
+      const m = oneDayModel();
+      const c2 = m.competitions.find((c) => c.id === 'c2');
+      const draft = { competitionId: 'c2', items: [], transport: ['Поезд'], transportDate: '' };
+      expect(stepProblem('review', draft, m)).toBe('Выберите дату перевозки');
+      expect(stepProblem('review', { ...draft, transportDate: dayOf(29) }, m)).toBe('Дата перевозки вне периода соревнования');
+      expect(stepProblem('review', { ...draft, transportDate: dayOf(31) }, m)).toBeNull();
+      // У обычного соревнования дата не нужна
+      expect(stepProblem('review', { ...draft, competitionId: 'c1' }, m)).toBeNull();
+      const { start, end } = transportDates(c2, dayOf(31));
+      expect([moscowDay(start), moscowDay(end)]).toEqual([dayOf(31), dayOf(31)]);
+      expect(transportDates(c2, '')).toEqual({ start: null, end: null });
+    });
+
+    it('изменение заявки: дата восстанавливается из сроков перевозки, если она в периоде', () => {
+      const m = oneDayModel((source) => {
+        source.sheets['Заявки'].rows[1]['Сроки перевозки начало'] = moscowMidnight(31);
+      });
+      const { draft } = draftFromApplication(m, m.applications.find((a) => a.number === '4'));
+      expect(draft).toMatchObject({ competitionId: 'c2', transportDate: dayOf(31) });
+
+      const outside = oneDayModel((source) => {
+        source.sheets['Заявки'].rows[1]['Сроки перевозки начало'] = moscowMidnight(29);
+      });
+      expect(draftFromApplication(outside, outside.applications.find((a) => a.number === '4')).draft.transportDate).toBe('');
+    });
+
+    it('администратор: при выборе соревнования сроки — дата начала; без дат признак не ставится', () => {
+      const m = oneDayModel();
+      const c2 = m.competitions.find((c) => c.id === 'c2');
+      const changed = withCompetition({ items: [], transport: [] }, c2);
+      expect([changed.transportStart, changed.transportEnd]).toEqual([dayOf(30), dayOf(30)]);
+      expect(competitionDraft(c2).oneDay).toBe(true);
+      expect(competitionProblem({ ...competitionDraft(c2), start: '', end: '' })).toContain('одним днём');
+    });
   });
 
   it('недавние участники и заявки на соревнование', () => {

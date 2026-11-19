@@ -36,6 +36,13 @@ export const COMPETITION_COLUMNS = [
   { key: 'start', label: 'Даты', type: 'date', value: (c) => c.start, render: formatCompetitionDates },
   { key: 'title', label: 'Название', value: (c) => c.title },
   { key: 'kind', label: 'Вид', value: (c) => c.kind, wide: true },
+  {
+    key: 'oneDay',
+    label: 'Одним днём',
+    value: (c) => (c.oneDay ? 'Да' : 'Нет'),
+    render: (c) => (c.oneDay ? <Badge tone="accent">Да</Badge> : 'Нет'),
+    wide: true,
+  },
   { key: 'address', label: 'Адрес', value: (c) => c.address, wide: true },
 ];
 

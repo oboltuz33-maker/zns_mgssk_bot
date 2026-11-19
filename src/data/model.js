@@ -165,6 +165,8 @@ export function buildModel(data) {
       start: toDate(r['Дата начала']),
       end: toDate(r['Дата завершения']),
       address: str(r['Адрес']),
+      // Выезд одним днём: в заявке перевозчик выбирает дату перевозки из периода соревнования
+      oneDay: str(r['Выезд одним днём']).toLowerCase() === 'да',
     }))
     .sort((a, b) => (a.start?.getTime() ?? Infinity) - (b.start?.getTime() ?? Infinity));
 

@@ -1,17 +1,48 @@
 import { postAction } from './api.js';
 import { DEFAULT_TRANSPORT, storageKey } from '../config.js';
+import { moscowDay } from './model.js';
 
 // Черновик заявки — то, что выбирает перевозчик в мастере:
-// { number, competitionId, items: [{ athleteId, weaponIds }], transport: [названия] }
-// number задан при изменении существующей заявки. Сроки перевозки в черновик не входят —
-// Apps Script ставит их сам по датам соревнования.
+// { number, competitionId, items: [{ athleteId, weaponIds }], transport: [названия], transportDate }
+// number задан при изменении существующей заявки. Сроки перевозки Apps Script ставит сам по датам соревнования;
+// transportDate («гггг-мм-дд» или '') — только для соревнований «Выезд одним днём»: перевозчик выбирает день
+// из периода соревнования, он записывается в обе даты сроков перевозки.
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+// Больше стольких дней в выборе даты перевозки не показываем (защита от ошибки в датах соревнования)
+const MAX_COMPETITION_DAYS = 31;
+
+// Полночь по Москве дня «гггг-мм-дд»
+const dayToDate = (day) => new Date(`${day}T00:00:00+03:00`);
+
+// Дни соревнования «гггг-мм-дд» от начала до окончания (без даты начала — пусто)
+export function competitionDays(competition) {
+  if (!competition?.start) return [];
+  const last = moscowDay(competition.end || competition.start);
+  const days = [];
+  for (let i = 0; i < MAX_COMPETITION_DAYS; i++) {
+    const day = moscowDay(new Date(competition.start.getTime() + i * DAY_MS));
+    if (day > last) break;
+    days.push(day);
+  }
+  return days;
+}
+
+// Дата перевозки, выбранная сразу: у соревнования «одним днём» из одного дня — этот день, иначе ''
+export const defaultTransportDate = (competition) => {
+  const days = competition?.oneDay ? competitionDays(competition) : [];
+  return days.length === 1 ? days[0] : '';
+};
 
 // Сроки перевозки, которые Apps Script запишет в заявку: за день до начала соревнования и через день
-// после окончания (TRANSPORT_DAYS_BEFORE / TRANSPORT_DAYS_AFTER в скрипте). Здесь — только для показа.
-export const transportDates = (competition) => {
+// после окончания (TRANSPORT_DAYS_BEFORE / TRANSPORT_DAYS_AFTER в скрипте), у соревнования «одним днём» —
+// выбранная дата перевозки (transportDate). Здесь — только для показа.
+export const transportDates = (competition, transportDate = '') => {
   if (!competition?.start) return { start: null, end: null };
+  if (competition.oneDay) {
+    const date = transportDate ? dayToDate(transportDate) : null;
+    return { start: date, end: date };
+  }
   const end = competition.end || competition.start;
   return { start: new Date(competition.start.getTime() - DAY_MS), end: new Date(end.getTime() + DAY_MS) };
 };
@@ -25,6 +56,7 @@ export function newDraft(model, me, competitionId = '') {
   return {
     number: null,
     competitionId: competition ? competition.id : '',
+    transportDate: defaultTransportDate(competition),
     // Перевозчик добавлен в заявку по умолчанию
     items: me ? [{ athleteId: me.id, weaponIds: defaultWeaponIds(me) }] : [],
     // Вид транспорта по умолчанию (если он есть в справочнике)
@@ -77,11 +109,16 @@ export function draftFromApplication(model, application, { withCompetition = tru
     .filter((t) => !model.transportTypes.includes(t))
     .forEach((t) => problems.push(`Вида транспорта «${t}» нет в справочнике`));
 
+  // Дата перевозки на соревнование «одним днём» — из сроков перевозки заявки, если она в периоде соревнования
+  const savedDay = application.transportStart ? moscowDay(application.transportStart) : '';
+  const transportDate = competition && competitionDays(competition).includes(savedDay) ? savedDay : defaultTransportDate(competition);
+
   const draft = {
     number: application.number,
     competitionId: competition ? competition.id : '',
     items,
     transport,
+    transportDate: competition?.oneDay ? transportDate : '',
   };
   return { draft, problems };
 }
@@ -103,8 +140,19 @@ export function stepProblem(stepId, draft, model) {
     const athlete = model.athletes.find((a) => a.id === empty.athleteId);
     return `Выберите оружие для спортсмена ${athlete?.shortName ?? ''}`;
   }
-  if (stepId === 'review') return draft.transport.length ? null : 'Выберите вид транспорта';
+  if (stepId === 'review') {
+    if (!draft.transport.length) return 'Выберите вид транспорта';
+    return transportDateProblem(draft, model);
+  }
   return null;
+}
+
+// Дата перевозки на соревнование «одним днём»: null — выбрана верно (или не нужна), иначе текст подсказки
+export function transportDateProblem(draft, model) {
+  const competition = model.competitions.find((c) => c.id === draft.competitionId);
+  if (!competition?.oneDay || !competition.start) return null;
+  if (!draft.transportDate) return 'Выберите дату перевозки';
+  return competitionDays(competition).includes(draft.transportDate) ? null : 'Дата перевозки вне периода соревнования';
 }
 
 // Спортсмены из прошлых заявок перевозчика — от недавних к давним, без повторов
@@ -166,6 +214,7 @@ export function loadSavedDraft(model, me) {
       draft: {
         number: null,
         competitionId: model.competitions.some((c) => c.id === draft.competitionId) ? draft.competitionId : '',
+        transportDate: draft.transportDate ?? '',
         items: draft.items
           .filter((i) => model.athletes.some((a) => a.id === i.athleteId))
           .map((i) => ({ ...i, weaponIds: i.weaponIds.filter((id) => weaponIds.has(id)) })),
@@ -202,6 +251,7 @@ export const saveApplication = (draft, requestId) =>
         competitionId: draft.competitionId,
         items: draft.items,
         transport: draft.transport,
+        transportDate: draft.transportDate || undefined,
       },
     },
     requestId,

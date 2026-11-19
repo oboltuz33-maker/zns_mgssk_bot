@@ -33,10 +33,10 @@ const fixture = () => ({
     ['a4', 'Кузнецов', 'Кузьма', '', '79004444444', '', '', 'Нет', '', '', '', ''],
   ],
   Соревнования: [
-    ['ID', 'Название', 'Номер из ЕКП', 'Вид соревнования', 'Дата начала', 'Дата завершения', 'Адрес', 'Рассылка'],
-    ['c1', 'Кубок Москвы', '101', 'Пулевая', day(10), day(12), 'Москва', 'до рассылки'],
-    ['c2', 'Прошедший кубок', '102', 'Пулевая', day(-5), day(-4), 'Тула', 'до рассылки'],
-    ['c3', 'Без даты', '103', 'Стендовая', '', '', 'Казань', 'до рассылки'],
+    ['ID', 'Название', 'Номер из ЕКП', 'Вид соревнования', 'Дата начала', 'Дата завершения', 'Адрес', 'Рассылка', 'Выезд одним днём'],
+    ['c1', 'Кубок Москвы', '101', 'Пулевая', day(10), day(12), 'Москва', 'до рассылки', ''],
+    ['c2', 'Прошедший кубок', '102', 'Пулевая', day(-5), day(-4), 'Тула', 'до рассылки', ''],
+    ['c3', 'Без даты', '103', 'Стендовая', '', '', 'Казань', 'до рассылки', ''],
   ],
   Оружие: [
     ['Ид', 'Название', 'Номер'],
@@ -192,6 +192,42 @@ describe('Создание заявки', () => {
     post(IVANOV, 'saveApplication', { application: { ...newApplication, competitionId: 'c3' } });
     const row = gas.sheet('Заявки').objects().find((r) => r['№'] === 10);
     expect(row['Сроки перевозки начало']).toBe('');
+  });
+
+  describe('выезд одним днём', () => {
+    const isoDay = (offset) => day(offset).toLocaleDateString('sv-SE');
+    const ONE_DAY = 8; // столбец «Выезд одним днём»
+    beforeEach(() => {
+      gas.sheet('Соревнования').values[1][ONE_DAY] = 'да';
+    });
+
+    it('сроки перевозки — выбранная дата', () => {
+      const result = post(IVANOV, 'saveApplication', { application: { ...newApplication, transportDate: isoDay(11) } });
+      expect(result.status).toBe('success');
+      const row = gas.sheet('Заявки').objects().find((r) => r['№'] === 10);
+      expect(row['Сроки перевозки начало']).toEqual(day(11));
+      expect(row['Сроки перевозки окончание']).toEqual(day(11));
+      // Границы периода тоже подходят
+      expect(post(IVANOV, 'saveApplication', { application: { ...newApplication, transportDate: isoDay(10) } }).status).toBe('success');
+      expect(post(IVANOV, 'saveApplication', { application: { ...newApplication, transportDate: isoDay(12) } }).status).toBe('success');
+    });
+
+    it('без даты и с датой вне периода — ошибка', () => {
+      expect(post(IVANOV, 'saveApplication', { application: newApplication }).message).toContain('Выберите дату перевозки');
+      expect(post(IVANOV, 'saveApplication', { application: { ...newApplication, transportDate: isoDay(9) } }).message).toContain(
+        'в период соревнования',
+      );
+      expect(post(IVANOV, 'saveApplication', { application: { ...newApplication, transportDate: isoDay(13) } }).status).toBe('error');
+      expect(gas.sheet('Заявки').objects().some((r) => r['№'] === 10)).toBe(false);
+    });
+
+    it('у обычного соревнования дата перевозки не учитывается', () => {
+      gas.sheet('Соревнования').values[1][ONE_DAY] = '';
+      post(IVANOV, 'saveApplication', { application: { ...newApplication, transportDate: isoDay(11) } });
+      const row = gas.sheet('Заявки').objects().find((r) => r['№'] === 10);
+      expect(row['Сроки перевозки начало']).toEqual(day(9));
+      expect(row['Сроки перевозки окончание']).toEqual(day(13));
+    });
   });
 
   it('только перевозчикам', () => {
@@ -791,6 +827,18 @@ describe('Администрирование: соревнования', () => {
     expect(post(PETROV, 'adminSaveCompetition', { competition: { ...competition, id: 'c1', title: 'Кубок Москвы — финал' } }).status).toBe('success');
     expect(gas.sheet('Соревнования').objects().find((r) => r.ID === 'c1')['Название']).toBe('Кубок Москвы — финал');
     expect(gas.sheet('Заявки').objects()[0]['Название соревнования']).toBe('Кубок');
+  });
+
+  it('«Выезд одним днём»: пишет «Да», снимается, без дат — ошибка', () => {
+    const result = post(PETROV, 'adminSaveCompetition', { competition: { ...competition, oneDay: true } });
+    expect(result.status).toBe('success');
+    const row = () => gas.sheet('Соревнования').objects().find((r) => r.ID === result.id);
+    expect(row()['Выезд одним днём']).toBe('Да');
+    post(PETROV, 'adminSaveCompetition', { competition: { ...competition, id: result.id, oneDay: false } });
+    expect(row()['Выезд одним днём']).toBe('');
+    expect(post(PETROV, 'adminSaveCompetition', { competition: { ...competition, start: '', end: '', oneDay: true } }).message).toContain(
+      'одним днём',
+    );
   });
 
   it('проверки: название, порядок дат, существование', () => {
