@@ -1,12 +1,14 @@
 import { useState } from 'react';
 import { postAction } from '../data/api.js';
 import { withAthleteFields } from '../data/patches.js';
+import { notificationSettingsFor } from '../data/model.js';
 import { Badge, EmptyState, PageHeader } from '../components.jsx';
 
-// Настройки уведомлений перевозчика: ключ — как в запросе setNotifications и в NOTIFY_COLUMN (data/model.js)
+// Настройки уведомлений: ключ — как в запросе setNotifications и в NOTIFY_COLUMN (data/model.js).
+// «О заявках»: перевозчику — смена статуса своих заявок, администратору — новые заявки
 const NOTIFICATIONS = [
   { key: 'competitions', field: 'notifyCompetitions', label: 'О новых соревнованиях' },
-  { key: 'applications', field: 'notifyApplications', label: 'Об изменении статуса заявок' },
+  { key: 'applications', field: 'notifyApplications', label: 'О заявках' },
 ];
 
 // 79001234567 → +7 900 123-45-67
@@ -15,14 +17,16 @@ const formatPhone = (phone) => {
   return m ? `+7 ${m[1]} ${m[2]}-${m[3]}-${m[4]}` : phone;
 };
 
-// Раздел «Профиль»: данные спортсмена (только просмотр — меняет администратор) и настройки уведомлений перевозчика
+// Раздел «Профиль»: данные спортсмена (только просмотр — меняет администратор) и настройки уведомлений
+// (у перевозчиков и администраторов)
 export function ProfilePage({ model, me, sheets, onOpenPage, onMessage }) {
   // Переключатель, который сейчас сохраняется: новое положение видно сразу, при ошибке — возвращается
   const [pending, setPending] = useState({});
 
   if (!me) return <EmptyState icon="👤" title="Спортсмен не определён" />;
 
-  const settings = me.isCarrier ? NOTIFICATIONS.filter((n) => model.notificationSettings.includes(n.key)) : [];
+  const shown = notificationSettingsFor(me, model.notificationSettings);
+  const settings = NOTIFICATIONS.filter((n) => shown.includes(n.key));
 
   const toggle = async (setting) => {
     const value = !me[setting.field];

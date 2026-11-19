@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { buildModel, findMyAthlete, isUpcomingCompetition, moscowDay } from '../src/data/model.js';
+import { buildModel, findMyAthlete, isUpcomingCompetition, moscowDay, notificationSettingsFor } from '../src/data/model.js';
 import {
   applicationsForCompetition,
   draftFromApplication,
@@ -116,6 +116,13 @@ describe('buildModel', () => {
     expect(byId.c1.start).toBeNull();
   });
 
+  it('разбирает «ID участников» через «;»; нет столбца — пустой список', () => {
+    expect(model.applications[0].participantIds).toEqual([]);
+    const source = data();
+    source.sheets['Заявки'].rows[0]['ID участников'] = ' a2;a3 ; ';
+    expect(buildModel(source).applications.find((a) => a.number === '3').participantIds).toEqual(['a2', 'a3']);
+  });
+
   it('разбирает заявки: оружие по спортсменам, транспорт, новые сверху', () => {
     expect(model.applications.map((a) => a.number)).toEqual(['4', '3']);
     const application = model.applications[1];
@@ -133,10 +140,31 @@ describe('buildModel', () => {
     expect(findMyAthlete(model).notifyApplications).toBe(false);
   });
 
+  it('входил ли спортсмен — по ChatId (виден администратору)', () => {
+    expect(findMyAthlete(model).hasChatId).toBe(false);
+    const source = data();
+    source.sheets['Спортсмены'].headers.push('ChatId');
+    source.sheets['Спортсмены'].rows[0].ChatId = 111;
+    const athletes = buildModel(source).athletes;
+    expect(athletes.find((a) => a.id === 'a1').hasChatId).toBe(true);
+    expect(athletes.find((a) => a.id === 'a2').hasChatId).toBe(false);
+  });
+
   it('предстоящее — с сегодняшнего дня по Москве; без даты — тоже', () => {
     expect(isUpcomingCompetition({ start: new Date() })).toBe(true);
     expect(isUpcomingCompetition({ start: new Date(Date.now() - 2 * 86400000) })).toBe(false);
     expect(isUpcomingCompetition({ start: null })).toBe(true);
+  });
+});
+
+describe('Настройки уведомлений в профиле', () => {
+  const all = ['competitions', 'applications'];
+  it('о соревнованиях — перевозчику, о заявках — перевозчику и администратору', () => {
+    expect(notificationSettingsFor({ isCarrier: true, isAdmin: false }, all)).toEqual(all);
+    expect(notificationSettingsFor({ isCarrier: false, isAdmin: true }, all)).toEqual(['applications']);
+    expect(notificationSettingsFor({ isCarrier: false, isAdmin: false }, all)).toEqual([]);
+    // Столбца в таблице нет — нет и переключателя
+    expect(notificationSettingsFor({ isCarrier: false, isAdmin: true }, ['competitions'])).toEqual([]);
   });
 });
 

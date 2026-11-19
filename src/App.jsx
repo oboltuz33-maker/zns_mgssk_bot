@@ -58,10 +58,15 @@ const initialPage = () => {
 };
 
 // ?page=application-form&competition=<ID> — мастер заявки сразу на этом соревновании
-// (кнопка «Подать заявку» в рассылке бота о новом соревновании)
+// (кнопка «Подать заявку» в рассылке бота о новом соревновании);
+// ?page=admin&tab=athletes — вкладка раздела «Админ» (кнопка в сообщениях администраторам о входе)
 const initialParams = () => {
-  const competitionId = new URLSearchParams(location.search).get('competition');
-  return competitionId && initialPage() === 'application-form' ? { competitionId } : {};
+  const search = new URLSearchParams(location.search);
+  const competitionId = search.get('competition');
+  const tab = search.get('tab');
+  if (competitionId && initialPage() === 'application-form') return { competitionId };
+  if (tab && initialPage() === 'admin') return { tab };
+  return {};
 };
 
 // Когда открыто приложение: данные, загруженные раньше (сохранённые на устройстве), могут не знать о новом соревновании

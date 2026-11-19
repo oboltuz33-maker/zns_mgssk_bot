@@ -45,7 +45,8 @@ const hasMainButton = () => Boolean(tg()?.initData && tg().MainButton && tg().is
 export function ApplicationWizard({ model, me, params, sheets, onOpenPage, onCancel }) {
   const [initial] = useState(() => {
     if (!params.number) return { draft: newDraft(model, me, params.competitionId), problems: [] };
-    const application = model.applications.find((a) => a.number === String(params.number));
+    // Только своя заявка: в данных есть и чужие, где спортсмен участник, — их менять нельзя (сервер тоже не даст)
+    const application = model.applications.find((a) => a.number === String(params.number) && a.createdById === me?.id);
     if (application) return draftFromApplication(model, application);
     // Заявки уже нет в данных (например, её взяли в работу и перенесли в архив) — мастер откроется для новой
     return {

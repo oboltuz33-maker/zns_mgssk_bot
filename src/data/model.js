@@ -85,6 +85,13 @@ const NOTIFY_COLUMN = {
   applications: 'Сообщать о заявках',
 };
 
+// Какие настройки уведомлений показать спортсмену в профиле (из тех, что есть в таблице): о соревнованиях — перевозчику,
+// о заявках — перевозчику (статус своих заявок) и администратору (новые заявки). То же правило, что в setNotifications_
+export function notificationSettingsFor(me, available) {
+  if (!me) return [];
+  return available.filter((key) => (key === 'competitions' ? me.isCarrier : me.isCarrier || me.isAdmin));
+}
+
 // Предстоящее соревнование — дата начала сегодня или позже (по Москве). То же правило, что в Apps Script:
 // только на такие можно подать заявку. Без даты (или с неверной датой) — тоже предстоящее, чтобы не потерялось.
 // Здесь — на случай данных, сохранённых на устройстве раньше
@@ -124,6 +131,8 @@ export function buildModel(data) {
       greetingName: (middleName ? [firstName, middleName] : [firstName, lastName]).filter(Boolean).join(' '),
       // Телефон виден только свой — у других спортсменов Apps Script его не отдаёт
       phone: str(r['Телефон']),
+      // Входил ли спортсмен в приложение (заполнен ChatId). Видно только администратору — остальным ChatId не отдаётся
+      hasChatId: str(r['ChatId']) !== '',
       status: str(r['Статус']),
       isCarrier: str(r['Перевозчик']).toLowerCase() === 'да',
       // Администратор: раздел «Администрирование». Признак виден только в своей строке (и администратору — у всех)
@@ -182,6 +191,8 @@ export function buildModel(data) {
       // CreatedBy — ID спортсмена, создавшего заявку; CreatedAt — момент создания (московское время)
       createdById: str(r['CreatedBy']),
       createdAt: toDate(r['CreatedAt']),
+      // ID участников, кроме автора (через «;») — участнику заявка видна только для просмотра
+      participantIds: str(r['ID участников']).split(';').map((id) => id.trim()).filter(Boolean),
     }))
     // Новые заявки сверху
     .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));

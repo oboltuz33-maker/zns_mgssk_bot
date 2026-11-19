@@ -105,7 +105,8 @@ export function AdminAthletes({ model, sheets, onOpenPage, onMessage }) {
               <Badge>🎯 {a.weapons.length}</Badge>
             </div>
             <div className="card-actions">
-              {a.status !== ATHLETE_STATUS.confirmed && (
+              {/* Не входивший в приложение подтверждается сам, когда войдёт по номеру телефона */}
+              {a.status !== ATHLETE_STATUS.confirmed && a.hasChatId && (
                 <button className="secondary-button" disabled={busyId !== null} onClick={() => confirm(a)}>
                   {busyId === a.id ? '…' : '✅ Подтвердить'}
                 </button>
@@ -134,6 +135,9 @@ const isDateCell = (value) => typeof value === 'string' && ISO_DATE.test(value);
 const inputValue = (value) => (isDateCell(value) ? moscowDay(new Date(value)) : String(value ?? ''));
 
 const NAME_COLUMNS = ['Фамилия', 'Имя', 'Отчество'];
+// Тот же текст, что у отказа сервера (NOT_LOGGED_IN_CONFIRM_MESSAGE в Apps Script)
+const NOT_LOGGED_IN_CONFIRM_HINT =
+  'Спортсмен ещё не входил в приложение. Он будет подтверждён автоматически, когда войдёт по номеру телефона';
 
 // Правка спортсмена: все столбцы листа, кроме ID, телефона и ChatId. Отправляются только изменённые.
 // params: { id }
@@ -159,6 +163,8 @@ export function AdminAthleteForm({ model, me, sheets, params, onOpenPage, onMess
   if (!source || !athlete) return <EmptyState icon="👥" title="Спортсмен не найден" />;
 
   const isSelf = athlete.id === me.id;
+  // «Подтвержден» — только входившему в приложение (есть ChatId); уже подтверждённая запись остаётся как есть
+  const canConfirm = athlete.hasChatId || initial['Статус'] === ATHLETE_STATUS.confirmed;
   const changed = columns.filter((c) => form[c] !== initial[c]);
   const problem = !String(form['Фамилия'] ?? '').trim() || !String(form['Имя'] ?? '').trim() ? 'Укажите фамилию и имя' : null;
 
@@ -241,13 +247,14 @@ export function AdminAthleteForm({ model, me, sheets, params, onOpenPage, onMess
                 </option>
               )}
               {ATHLETE_STATUSES.map((s) => (
-                <option key={s} value={s}>
+                <option key={s} value={s} disabled={s === ATHLETE_STATUS.confirmed && !canConfirm}>
                   {s}
                 </option>
               ))}
             </select>
           </label>
         )}
+        {!canConfirm && <div className="item-hint">{NOT_LOGGED_IN_CONFIRM_HINT}</div>}
         {isSelf && <div className="item-hint">Свой статус и признак администратора изменить нельзя — пропадёт доступ</div>}
       </div>
 

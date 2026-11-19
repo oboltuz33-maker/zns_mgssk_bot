@@ -15,13 +15,14 @@ const STRANGER = { id: 999, first_name: 'Незнакомец' };
 const APPLICATION_HEADERS = [
   '№', 'ФИО', 'Оружие', 'Сроки перевозки начало', 'Сроки перевозки окончание', 'Вид транспорта', 'Вид соревнования',
   'Название соревнования', 'Номер в ЕКП', 'Сроки по ЕКП начало', 'Сроки по ЕКП окончание', 'Адрес', 'Статус',
-  'CreatedBy', 'CreatedAt', 'Примечание', 'Причина отклонения',
+  'CreatedBy', 'CreatedAt', 'Примечание', 'Причина отклонения', 'ID участников',
 ];
 
-const application = (number, author, status, note = '') => [
+const application = (number, author, status, note = '', participants = '') => [
   number, 'ФИО', 'Иванов И.И. : МР-512 - 123', '', '', 'Автомобиль', 'Пулевая', 'Кубок', '1', '', '', 'Москва',
-  status, author, day(-1), note, '',
+  status, author, day(-1), note, '', participants,
 ];
+const PARTICIPANTS = APPLICATION_HEADERS.indexOf('ID участников');
 
 const fixture = () => ({
   Спортсмены: [
@@ -115,6 +116,16 @@ describe('Отдача листов приложению', () => {
     expect(numbers).toEqual([5, 7]);
   });
 
+  it('заявки — и те, где спортсмен участник (ID через «;»)', () => {
+    const sheet = gas.sheet('Спортсмены');
+    sheet.values[2][11] = 'Нет'; // Петров — не администратор: ему видна не вся таблица
+    gas.sheet('Заявки').values[3][PARTICIPANTS] = 'a4;a2 '; // № 7 Иванова: участники Кузнецов и Петров
+    expect(load(PETROV).sheets['Заявки'].rows.map((r) => r[0])).toEqual([6, 7]);
+    // ID, в котором содержится чужой, не подходит: «a22» — не «a2»
+    gas.sheet('Заявки').values[3][PARTICIPANTS] = 'a22';
+    expect(load(PETROV, { fresh: true }).sheets['Заявки'].rows.map((r) => r[0])).toEqual([6]);
+  });
+
   it('соревнования — только предстоящие и без даты', () => {
     const ids = load(IVANOV).sheets['Соревнования'].rows.map((r) => r[0]);
     expect(ids).toEqual(['c1', 'c3']);
@@ -170,6 +181,8 @@ describe('Создание заявки', () => {
     expect(row['Вид транспорта']).toBe('Автомобиль;\nПоезд');
     expect(row['Статус']).toBe('Новая');
     expect(row['CreatedBy']).toBe('a1');
+    // Участники — без автора
+    expect(row['ID участников']).toBe('a2');
     expect(row['Сроки перевозки начало']).toEqual(day(9));
     expect(row['Сроки перевозки окончание']).toEqual(day(13));
     expect(row['Название соревнования']).toBe('Кубок Москвы');
@@ -221,6 +234,52 @@ describe('Создание заявки', () => {
     const second = gas.post(body);
     expect(second).toEqual(first);
     expect(gas.sheet('Заявки').objects()).toHaveLength(4);
+  });
+});
+
+describe('Сообщение администраторам о новой заявке', () => {
+  const messages = () => gas.telegram.filter((r) => r.url.endsWith('/sendMessage'));
+  const logEvents = () => gas.sheet('_Журнал').objects().map((r) => r['Событие']);
+
+  it('уходит подтверждённым администраторам после снятия блокировки', () => {
+    expect(post(IVANOV, 'saveApplication', { application: newApplication }).status).toBe('success');
+    const sent = messages();
+    // Сидоров — администратор, но ждёт подтверждения
+    expect(sent.map((m) => m.payload.chat_id)).toEqual(['222']);
+    expect(sent[0].scriptLocked).toBe(false);
+    const dates = `${day(10).toLocaleDateString('ru-RU')} – ${day(12).toLocaleDateString('ru-RU')}`;
+    expect(sent[0].payload.text).toBe(
+      `Новая заявка № 10\nПеревозчик: Иванов Иван Иванович\nСоревнование: Кубок Москвы\nСроки по ЕКП: ${dates}\nУчастников: 2`,
+    );
+    expect(logEvents()).toContain('Уведомление администраторам: новая заявка');
+  });
+
+  it('без сроков по ЕКП — без строки сроков', () => {
+    post(IVANOV, 'saveApplication', { application: { ...newApplication, competitionId: 'c3' } });
+    expect(messages()[0].payload.text).not.toContain('Сроки по ЕКП');
+  });
+
+  it('не уходит отключившим, автору-администратору и при правке заявки', () => {
+    post(PETROV, 'setNotifications', { notifications: { applications: false } });
+    post(IVANOV, 'saveApplication', { application: newApplication });
+    expect(messages()).toHaveLength(0);
+
+    post(PETROV, 'setNotifications', { notifications: { applications: true } });
+    post(IVANOV, 'saveApplication', { application: { ...newApplication, number: 5, transport: ['Поезд'] } });
+    expect(messages()).toHaveLength(0);
+
+    // Иванов — администратор и автор: себе не пишет, Петрову — пишет
+    gas.sheet('Спортсмены').values[1][11] = 'Да';
+    post(IVANOV, 'saveApplication', { application: newApplication });
+    expect(messages().map((m) => m.payload.chat_id)).toEqual(['222']);
+  });
+
+  it('сбой отправки не отменяет заявку — пишется в журнал', () => {
+    gas.failTelegram('сеть недоступна');
+    const result = post(IVANOV, 'saveApplication', { application: newApplication });
+    expect(result.status).toBe('success');
+    expect(gas.sheet('Заявки').objects().some((r) => r['№'] === 10)).toBe(true);
+    expect(logEvents()).toContain('Уведомление администраторам: ошибка');
   });
 });
 
@@ -319,6 +378,113 @@ describe('Доступ по телефону и по ФИО', () => {
   });
 });
 
+describe('Сообщения администраторам о входе', () => {
+  const messages = () => gas.telegram.filter((r) => r.url.endsWith('/sendMessage'));
+  const log = () => gas.sheet('_Журнал').objects();
+  const KUZMA = { id: 444, first_name: 'Кузьма', username: 'kuzma' };
+  // Ячейка листа «Спортсмены»: index — строка (0 — заголовки), столбцы: 5 — ChatId, 6 — Статус, 11 — Администратор
+  const setCell = (index, column, value) => void (gas.sheet('Спортсмены').values[index][column] = value);
+
+  it('автоподтверждение — «для сведения», с кнопкой на спортсменов, после снятия блокировки', () => {
+    expect(post(KUZMA, 'linkPhone', { contact: contactFor(444, '79004444444') }).status).toBe('success');
+    const sent = messages();
+    expect(sent.map((m) => m.payload.chat_id)).toEqual(['222']);
+    expect(sent[0].scriptLocked).toBe(false);
+    expect(sent[0].payload.text).toBe(
+      'ℹ️ Для сведения\nВошёл в приложение: Кузнецов Кузьма\nТелефон: +7 900 444-44-44\nTelegram: Кузьма (@kuzma)\n\n' +
+        'Подтверждён автоматически (был внесён в список) — делать ничего не нужно.',
+    );
+    const button = sent[0].payload.reply_markup.inline_keyboard[0][0];
+    expect(button.text).toBe('Открыть спортсменов');
+    expect(button.web_app.url).toBe('https://example.org/app/?page=admin&tab=athletes');
+    expect(log().map((r) => r['Событие'])).toContain('Уведомление администраторам: вход (подтверждён автоматически)');
+  });
+
+  it('заявка по ФИО — «требуется участие»; уходит и отключившим сообщения о заявках', () => {
+    post(PETROV, 'setNotifications', { notifications: { applications: false } });
+    gas.telegram.length = 0;
+    const contact = contactFor(999, '79009999999');
+    expect(post(STRANGER, 'register', { lastName: 'Новиков', firstName: 'Ник', contact }).status).toBe('pending');
+    const sent = messages();
+    expect(sent.map((m) => m.payload.chat_id)).toEqual(['222']);
+    expect(sent[0].payload.text).toMatch(/^❗ Требуется ваше участие\nЗаявка на доступ: Новиков Ник\nТелефон: \+7 900 999-99-99/);
+    expect(sent[0].payload.text).toContain('Проверьте и подтвердите доступ.');
+  });
+
+  it('номер найден, запись ждёт подтверждения или доступ закрыт — «требуется участие»', () => {
+    setCell(4, 6, 'Требует подтверждения');
+    post(KUZMA, 'linkPhone', { contact: contactFor(444, '79004444444') });
+    expect(messages()[0].payload.text).toContain('Ждёт подтверждения: Кузнецов Кузьма');
+
+    gas.telegram.length = 0;
+    setCell(4, 5, '');
+    setCell(4, 6, 'Архив');
+    expect(post(KUZMA, 'linkPhone', { contact: contactFor(444, '79004444444') }).status).toBe('forbidden');
+    expect(messages()[0].payload.text).toContain('Статус «Архив» — доступ закрыт.');
+  });
+
+  it('конфликт привязки и дубль ФИО — с подсказкой; повтор за сутки не отправляется', () => {
+    expect(post(STRANGER, 'linkPhone', { contact: contactFor(999, '79001111111') }).status).toBe('conflict');
+    expect(messages()[0].payload.text).toContain('очистите ChatId в его строке');
+    post(STRANGER, 'linkPhone', { contact: contactFor(999, '79001111111') });
+    expect(messages()).toHaveLength(1);
+    expect(log().at(-1)['Подробности']).toContain('Повтор за сутки');
+
+    // Через сутки — снова
+    gas.props.put('access-alert:conflict:79001111111', String(Date.now() - 25 * 60 * 60 * 1000));
+    post(STRANGER, 'linkPhone', { contact: contactFor(999, '79001111111') });
+    expect(messages()).toHaveLength(2);
+
+    gas.telegram.length = 0;
+    const user = { id: 888, first_name: 'Двойник' };
+    const twin = { lastName: 'ИВАНОВ', firstName: 'Иван', contact: contactFor(888, '79008888888') };
+    expect(post(user, 'register', twin).status).toBe('conflict');
+    expect(messages()[0].payload.text).toContain('В списке уже есть Иванов Иван Иванович — с другим номером.');
+    expect(messages()[0].payload.text).toContain('впишите номер +7 900 888-88-88 в его строку и очистите ChatId');
+    post(user, 'register', twin);
+    expect(messages()).toHaveLength(1);
+  });
+
+  it('без сообщения: уже подтверждённая запись, номер не найден, неверная подпись, повторный вход', () => {
+    setCell(4, 6, 'Подтвержден');
+    post(KUZMA, 'linkPhone', { contact: contactFor(444, '79004444444') });
+    post(KUZMA, 'linkPhone', { contact: contactFor(444, '79004444444') });
+    expect(post(STRANGER, 'linkPhone', { contact: contactFor(999, '79005555555') }).status).toBe('not_found');
+    expect(post(STRANGER, 'linkPhone', { contact: contactFor(555, '79004444444') }).status).toBe('error');
+    expect(messages()).toHaveLength(0);
+  });
+
+  it('администратор, внесённый заранее, о своём входе не получает', () => {
+    setCell(4, 11, 'Да');
+    post(KUZMA, 'linkPhone', { contact: contactFor(444, '79004444444') });
+    expect(messages().map((m) => m.payload.chat_id)).toEqual(['222']);
+  });
+
+  it('сбой Telegram не меняет ответ и пишется в журнал', () => {
+    gas.failTelegram('сеть недоступна');
+    expect(post(KUZMA, 'linkPhone', { contact: contactFor(444, '79004444444') })).toMatchObject({ status: 'success', athleteId: 'a4' });
+    const contact = contactFor(999, '79009999999');
+    expect(post(STRANGER, 'register', { lastName: 'Новиков', firstName: 'Ник', contact }).status).toBe('pending');
+    expect(log().filter((r) => r['Событие'] === 'Уведомление администраторам: ошибка')).toHaveLength(2);
+  });
+});
+
+describe('Подтверждение спортсмена без ChatId', () => {
+  it('«Подтвержден» не ставится не входившему, ставится входившему', () => {
+    const result = post(PETROV, 'adminSaveAthlete', { athleteId: 'a4', fields: { Статус: 'Подтвержден' } });
+    expect(result.status).toBe('error');
+    expect(result.message).toContain('ещё не входил в приложение');
+
+    expect(post(PETROV, 'adminSaveAthlete', { athleteId: 'a3', fields: { Статус: 'Подтвержден' } }).status).toBe('success');
+  });
+
+  it('уже подтверждённую запись без ChatId править можно', () => {
+    gas.sheet('Спортсмены').values[4][6] = 'Подтвержден';
+    const result = post(PETROV, 'adminSaveAthlete', { athleteId: 'a4', fields: { Статус: 'Подтвержден', Имя: 'Кузя' } });
+    expect(result.status).toBe('success');
+  });
+});
+
 describe('Закрепление оружия и настройки', () => {
   it('закрепить за собой нельзя; открепить от себя — только администратору', () => {
     expect(post(IVANOV, 'assignWeapon', { weaponId: 'w2' }).message).toContain('только администратор');
@@ -328,10 +494,16 @@ describe('Закрепление оружия и настройки', () => {
     expect(gas.sheet('Спортсмен/Оружие').objects()).toEqual([{ 'Спортсмен ид': 'a1', 'Оружие ид': 'w1' }]);
   });
 
-  it('настройки уведомлений — только перевозчику', () => {
+  it('настройки уведомлений: о соревнованиях — перевозчику, о заявках — и администратору', () => {
     const result = post(IVANOV, 'setNotifications', { notifications: { competitions: false } });
     expect(result.fields).toEqual({ 'Сообщать о соревнованиях': 'Нет' });
     expect(post(PETROV, 'setNotifications', { notifications: { competitions: false } }).status).toBe('error');
+    expect(post(PETROV, 'setNotifications', { notifications: { applications: false } }).fields).toEqual({ 'Сообщать о заявках': 'Нет' });
+  });
+
+  it('не перевозчику и не администратору — отказ', () => {
+    gas.sheet('Спортсмены').values[2][11] = 'Нет';
+    expect(post(PETROV, 'setNotifications', { notifications: { applications: false } }).status).toBe('error');
   });
 });
 
@@ -464,6 +636,7 @@ describe('Администрирование', () => {
       'Название соревнования': 'Кубок',
       Статус: 'Новая',
       CreatedBy: 'a1',
+      'ID участников': 'a2; a4',
     });
     expect(gas.sheet('Заявки').formulas[1][15]).toBe('=1+1');
   });
@@ -665,6 +838,33 @@ describe('Администрирование: оружие', () => {
     expect(post(PETROV, 'adminUnassignWeapon', { athleteId: 'a4', weaponId: 'w2' }).status).toBe('success');
     expect(links().filter((l) => l['Спортсмен ид'] === 'a4')).toHaveLength(2);
     expect(post(IVANOV, 'adminAssignWeapon', { athleteId: 'a4', weaponId: 'w2' }).status).toBe('error');
+  });
+});
+
+describe('Заполнение «ID участников» у прежних заявок', () => {
+  const fill = () => gas.run().__eval('fillApplicationParticipants()');
+  const WEAPON = APPLICATION_HEADERS.indexOf('Оружие');
+
+  it('по «Фамилия И.О.» из «Оружия», без автора; заполненные не трогает; несопоставленные — в отчёт', () => {
+    const sheet = gas.sheet('Заявки');
+    // № 6 Петрова: Иванов, сам Петров (автор) и неизвестный; «ё» и регистр не мешают
+    sheet.values[2][WEAPON] = 'ИВАНОВ И.И. : МР-512 - 123\nПётров П. : Benelli - 777\nНеизвестный Н. : X - 1';
+    sheet.values[3][PARTICIPANTS] = 'a4'; // № 7 — уже заполнена вручную
+    // В архиве № 9 Иванова: участник только сам автор
+    fill();
+
+    expect(sheet.objects().map((r) => [r['№'], r['ID участников']])).toEqual([[5, ''], [6, 'a1'], [7, 'a4']]);
+    expect(gas.sheet('Архив заявок').objects()[0]['ID участников']).toBe('');
+    const log = gas.sheet('_Журнал').objects().find((r) => r['Событие'] === 'Заполнение «ID участников»');
+    expect(log['Подробности']).toContain('«Заявки»: заполнено заявок — 1');
+    expect(log['Подробности']).toContain('№ 6: «Неизвестный Н.» — не найден');
+  });
+
+  it('нет столбца — подсказка в отчёте, лист не меняется', () => {
+    gas.sheet('Архив заявок').values[0][PARTICIPANTS] = 'Другое';
+    fill();
+    const log = gas.sheet('_Журнал').objects().find((r) => r['Событие'] === 'Заполнение «ID участников»');
+    expect(log['Подробности']).toContain('«Архив заявок»: нет столбца «ID участников»');
   });
 });
 

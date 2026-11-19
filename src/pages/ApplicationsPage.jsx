@@ -7,12 +7,31 @@ import { APPLICATION_CARD_HEIGHT, confirmAction, useListView } from '../helpers.
 import { fuzzySearch } from '../data/search.js';
 import { MY_APPLICATION_COLUMNS } from '../listColumns.jsx';
 
+// Заявки других перевозчиков, где спортсмен участник, — только просмотр, с ФИО перевозчика.
+// Без поиска и таблицы: таких заявок у спортсмена обычно немного
+function ParticipantApplications({ applications }) {
+  return (
+    <>
+      <h2 className="section-title">Заявки с моим участием</h2>
+      <CardsOrTable
+        listView={CARDS_ONLY}
+        items={applications}
+        rowKey={(a) => a.number}
+        cardHeight={APPLICATION_CARD_HEIGHT}
+        renderCard={(a) => <ApplicationCard key={a.number} application={a} showAuthor />}
+      />
+    </>
+  );
+}
+const CARDS_ONLY = { view: 'cards' };
+
 export function ApplicationsPage({ model, me, sheets, onOpenPage, onMessage }) {
-  // Показываем только заявки текущего спортсмена (CreatedBy = его ID; отбор делает и Apps Script)
+  // Свои заявки (CreatedBy = ID спортсмена) и заявки, где он участник (столбец «ID участников»); отбор делает и Apps Script
   const [query, setQuery] = useState('');
   const [deleting, setDeleting] = useState(null);
 
   const mine = me ? model.applications.filter((a) => a.createdById === me.id) : [];
+  const participating = me ? model.applications.filter((a) => a.createdById !== me.id && a.participantIds.includes(me.id)) : [];
   // Поиск с опечатками, в другой раскладке и транслитом
   const list = fuzzySearch(mine, query, (a) =>
     [a.number, a.competitionTitle, a.ekpNumber, a.address, a.status, ...a.weaponLines, ...a.transportList].join(' '),
@@ -40,14 +59,20 @@ export function ApplicationsPage({ model, me, sheets, onOpenPage, onMessage }) {
 
   return (
     <>
-      <PageHeader title="Мои заявки" subtitle={me ? `${me.fullName} · всего: ${mine.length}` : undefined} />
-
       {!me?.isCarrier ? (
-        <EmptyState icon="🚚" title="Создавать заявки могут только перевозчики">
-          Вас могут включить в заявку перевозчики клуба
-        </EmptyState>
+        <>
+          <PageHeader title="Заявки" subtitle={me ? `${me.fullName} · с моим участием: ${participating.length}` : undefined} />
+          {participating.length === 0 ? (
+            <EmptyState icon="🚚" title="Вас пока не включили ни в одну заявку">
+              Создавать заявки могут только перевозчики — они и включают в них участников
+            </EmptyState>
+          ) : (
+            <ParticipantApplications applications={participating} />
+          )}
+        </>
       ) : (
         <>
+          <PageHeader title="Мои заявки" subtitle={me ? `${me.fullName} · всего: ${mine.length}` : undefined} />
           <button className="primary-button wide-button" onClick={() => onOpenPage('application-form', {})}>
             ＋ Новая заявка
           </button>
@@ -93,6 +118,8 @@ export function ApplicationsPage({ model, me, sheets, onOpenPage, onMessage }) {
               </ApplicationCard>
             )}
           />
+
+          {participating.length > 0 && <ParticipantApplications applications={participating} />}
         </>
       )}
     </>
