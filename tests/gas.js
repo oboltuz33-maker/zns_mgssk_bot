@@ -7,7 +7,7 @@ const SOURCE = fs.readFileSync(new URL('../apps-script/sheets.gs', import.meta.u
 
 const SERVICES = [
   'SpreadsheetApp', 'CacheService', 'PropertiesService', 'LockService', 'Utilities', 'Session',
-  'ContentService', 'UrlFetchApp', 'ScriptApp', 'console',
+  'ContentService', 'UrlFetchApp', 'ScriptApp', 'DriveApp', 'MimeType', 'console',
 ];
 
 // Функции скрипта, которые тесты вызывают напрямую
@@ -65,6 +65,16 @@ class FakeRange {
     storeCell(this.sheet, this.row - 1, this.column - 1, value);
     return this;
   }
+  clearContent() {
+    for (let i = 0; i < this.numRows; i++) {
+      for (let j = 0; j < this.numColumns; j++) {
+        const r = this.row - 1 + i;
+        const c = this.column - 1 + j;
+        if (r < this.sheet.values.length) storeCell(this.sheet, r, c, '');
+      }
+    }
+    return this;
+  }
 }
 
 export class FakeSheet {
@@ -78,7 +88,24 @@ export class FakeSheet {
     rows.forEach((row, r) => row.forEach((v, c) => storeCell(this, r, c, v)));
   }
   getName() { return this.name; }
-  getLastRow() { return this.values.length; }
+  setName(name) {
+    this.name = name;
+    return this;
+  }
+  // Последняя строка с данными (пустые строки в конце, например после clearContent, не считаются)
+  getLastRow() {
+    let last = this.values.length;
+    while (last > 0 && (this.values[last - 1] ?? []).every((v) => v === '' || v === undefined)) last--;
+    return last;
+  }
+  // Копия листа в другую таблицу — значения и формулы, название «Копия …», как у Google
+  copyTo(spreadsheet) {
+    const copy = new FakeSheet('Копия ' + this.name);
+    copy.values = this.values.map((row) => row.slice());
+    copy.formulas = this.formulas.map((row) => row.slice());
+    spreadsheet.sheets.push(copy);
+    return copy;
+  }
   getLastColumn() { return Math.max(0, ...this.values.map((r) => r.length)); }
   // Сетка листа: maxRows строк (как у нового листа Google — 1000), insertRowsAfter её расширяет
   getMaxRows() { return Math.max(this.maxRows, this.values.length); }
@@ -111,20 +138,90 @@ export class FakeSheet {
   setFrozenRows() {}
   // Строки листа объектами { заголовок: значение } — для проверок
   objects() {
-    const [headers, ...rows] = this.values;
+    const [headers, ...rows] = this.values.slice(0, this.getLastRow());
     return rows.map((row) => Object.fromEntries(headers.map((h, i) => [h, row[i] ?? ''])));
   }
 }
 
 class FakeSpreadsheet {
-  constructor(sheets) { this.sheets = sheets; }
-  getName() { return 'Тестовая таблица'; }
+  constructor(sheets, id = 'main', name = 'Тестовая таблица') {
+    Object.assign(this, { sheets, id, name });
+  }
+  getId() { return this.id; }
+  getName() { return this.name; }
+  deleteSheet(sheet) {
+    if (this.sheets.length === 1) throw new Error('Нельзя удалить все листы');
+    this.sheets = this.sheets.filter((s) => s !== sheet);
+  }
   getSheetByName(name) { return this.sheets.find((s) => s.name === name) ?? null; }
   getSheets() { return this.sheets; }
   insertSheet(name) {
     const sheet = new FakeSheet(name);
     this.sheets.push(sheet);
     return sheet;
+  }
+}
+
+// ---------- Диск ----------
+
+// Файлы и папки Диска: таблицы, созданные скриптом (SpreadsheetApp.create), — файлы с той же id
+class FakeDrive {
+  constructor() {
+    this.files = new Map();
+    this.folders = new Map();
+    this.spreadsheets = new Map();
+    this.nextId = 1;
+    // Сбой создания таблицы (например, лимит Google)
+    this.createError = null;
+  }
+  createSpreadsheet(name) {
+    if (this.createError) throw new Error(this.createError);
+    const id = 'file' + this.nextId++;
+    const spreadsheet = new FakeSpreadsheet([new FakeSheet('Лист1')], id, name);
+    this.spreadsheets.set(id, spreadsheet);
+    this.files.set(id, { id, spreadsheet, description: '', folder: null, trashed: false, created: new Date() });
+    return spreadsheet;
+  }
+  // Объект DriveApp
+  api() {
+    const drive = this;
+    const fileApi = (file) => ({
+      getId: () => file.id,
+      getName: () => file.spreadsheet.getName(),
+      getDateCreated: () => file.created,
+      setDescription(text) { file.description = text; return this; },
+      moveTo(folder) { file.folder = folder.getId(); return this; },
+      setTrashed(value) { file.trashed = value; return this; },
+    });
+    const folderApi = (folder) => ({
+      getId: () => folder.id,
+      getName: () => folder.name,
+      getUrl: () => 'https://drive.example/' + folder.id,
+      isTrashed: () => folder.trashed,
+      getFilesByType: () => {
+        const list = [...drive.files.values()].filter((f) => f.folder === folder.id && !f.trashed).map(fileApi);
+        return { hasNext: () => list.length > 0, next: () => list.shift() };
+      },
+    });
+    return {
+      getFileById: (id) => {
+        if (!drive.files.has(id)) throw new Error('Нет файла ' + id);
+        return fileApi(drive.files.get(id));
+      },
+      getFolderById: (id) => {
+        if (!drive.folders.has(id)) throw new Error('Нет папки ' + id);
+        return folderApi(drive.folders.get(id));
+      },
+      createFolder: (name) => {
+        const folder = { id: 'folder' + drive.nextId++, name, trashed: false };
+        drive.folders.set(folder.id, folder);
+        return folderApi(folder);
+      },
+    };
+  }
+  // Копии в папке (не в корзине), по порядку создания
+  filesIn(folderId) {
+    return [...this.files.values()].filter((f) => f.folder === folderId && !f.trashed);
   }
 }
 
@@ -160,6 +257,7 @@ export const contactFor = (userId, phone) =>
 // Окружение скрипта: таблица из листов sheets ({ имя: [[заголовки], [строка], …] }) и сервисы с общим состоянием
 export function createGas(sheets) {
   const spreadsheet = new FakeSpreadsheet(Object.entries(sheets).map(([name, rows]) => new FakeSheet(name, rows)));
+  const drive = new FakeDrive();
   const cache = keyValueStore();
   const props = keyValueStore();
   props.put('BOT_TOKEN', BOT_TOKEN);
@@ -187,7 +285,18 @@ export function createGas(sheets) {
   const documentLock = newLock();
 
   const services = {
-    SpreadsheetApp: { getActiveSpreadsheet: () => spreadsheet, openById: () => spreadsheet, flush() {} },
+    SpreadsheetApp: {
+      getActiveSpreadsheet: () => spreadsheet,
+      openById: (id) => {
+        if (id === spreadsheet.getId()) return spreadsheet;
+        if (!drive.spreadsheets.has(id)) throw new Error('Нет таблицы ' + id);
+        return drive.spreadsheets.get(id);
+      },
+      create: (name) => drive.createSpreadsheet(name),
+      flush() {},
+    },
+    DriveApp: drive.api(),
+    MimeType: { GOOGLE_SHEETS: 'application/vnd.google-apps.spreadsheet' },
     CacheService: { getScriptCache: () => cache },
     PropertiesService: {
       getScriptProperties: () => ({
@@ -215,11 +324,12 @@ export function createGas(sheets) {
         },
       }),
       computeHmacSha256Signature: (value, key) => [...hmac(Buffer.from(key), Buffer.from(value))],
-      // Поддерживаются форматы, которые использует скрипт: dd.MM.yyyy и yyyy-MM-dd
-      formatDate: (date, timeZone, format) =>
-        format === 'yyyy-MM-dd'
-          ? date.toLocaleDateString('sv-SE', { timeZone: 'Europe/Moscow' })
-          : date.toLocaleDateString('ru-RU', { timeZone: 'Europe/Moscow' }),
+      // Поддерживаются форматы, которые использует скрипт: dd.MM.yyyy, yyyy-MM-dd и yyyy-MM-dd HH:mm
+      formatDate: (date, timeZone, format) => {
+        const day = date.toLocaleDateString(format.startsWith('yyyy') ? 'sv-SE' : 'ru-RU', { timeZone: 'Europe/Moscow' });
+        if (!format.endsWith('HH:mm')) return day;
+        return day + ' ' + date.toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
+      },
     },
     Session: { getScriptTimeZone: () => 'Europe/Moscow' },
     ContentService: { createTextOutput: (text) => ({ text, setMimeType() { return this; } }), MimeType: { JSON: 'json' } },
@@ -234,6 +344,7 @@ export function createGas(sheets) {
 
   return {
     spreadsheet,
+    drive,
     sheet: (name) => spreadsheet.getSheetByName(name),
     cache,
     props,

@@ -68,6 +68,7 @@
  * функцией installTriggers). Перевозчик может отключить в профиле рассылку о соревнованиях и сообщения о своих
  * заявках (столбцы ATHLETE_COLUMN.notifyCompetitions / notifyApplications).
  * Настройка окружения и проверка — функции раздела «Настройка окружения» (checkSetup, setupMenuButton, …).
+ * Резервные копии — раз в сутки в папку на Диске владельца; восстановление — вручную (раздел «Резервные копии»).
  *
  * Ответы: status = success | unregistered | pending | forbidden | expired | not_found | conflict | error
  * (expired — подпись Telegram верна, но приложение открыто больше INIT_DATA_MAX_AGE_SECONDS назад).
@@ -2041,7 +2042,7 @@ function verifiedPhone_(contactResponse, user) {
  *  - вебхук — должен быть «не задан»: сообщения боту этот скрипт не обрабатывает (иначе см. removeWebhook);
  *  - кнопка меню — куда ведёт (должна вести на MINI_APP_URL; иначе см. setupMenuButton);
  *  - MINI_APP_URL, адрес веб-приложения этого скрипта (в редакторе часто видна служебная ссылка …/dev),
- *    название таблицы и есть ли триггер onSheetEdit.
+ *    название таблицы, есть ли триггеры и когда сделана последняя резервная копия.
  */
 function checkSetup() {
   const props = PropertiesService.getScriptProperties();
@@ -2078,6 +2079,7 @@ function checkSetup() {
   SCRIPT_TRIGGERS.forEach(function (name) {
     lines.push('Триггер ' + name + ': ' + (handlers.indexOf(name) !== -1 ? 'есть' : 'нет — запустите installTriggers'));
   });
+  lines.push(backupReport_());
   lines.push('');
   lines.push('Запас по лимитам (⚠ — занято больше ' + Math.round(LIMIT_WARN_SHARE * 100) + '%):');
   limitsReport_(spreadsheet_()).forEach(function (line) { lines.push(line); });
@@ -2181,13 +2183,14 @@ function markExistingCompetitions() {
 /**
  * installTriggers — триггеры скрипта:
  *  - onSheetEdit на ручные правки таблицы (ID новым строкам, сброс кэша, уведомления);
- *  - archivePastApplications раз в сутки в ARCHIVE_HOUR (перенос заявок прошедших соревнований в архив).
+ *  - archivePastApplications раз в сутки в ARCHIVE_HOUR (перенос заявок прошедших соревнований в архив);
+ *  - backupSpreadsheet раз в сутки в BACKUP_HOUR (резервная копия таблицы, см. «Резервные копии»).
  *
  * Когда запускать: один раз при настройке окружения. Повторный запуск безопасен — прежние триггеры этих функций
  * удаляются, дублей не будет; другие триггеры не трогаются.
  * Если Google отвечает «Произошла неизвестная ошибка» — создайте триггеры вручную: «Триггеры» (⏰) →
  * «Добавить триггер» → функция onSheetEdit, источник «Из таблицы», тип «При изменении»; функция
- * archivePastApplications, источник «Время», «Ежедневно», ночью.
+ * archivePastApplications и backupSpreadsheet, источник «Время», «Ежедневно», ночью.
  */
 function installTriggers() {
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
@@ -2195,10 +2198,11 @@ function installTriggers() {
   });
   ScriptApp.newTrigger('onSheetEdit').forSpreadsheet(spreadsheet_()).onEdit().create();
   ScriptApp.newTrigger('archivePastApplications').timeBased().everyDays(1).atHour(ARCHIVE_HOUR).create();
+  ScriptApp.newTrigger('backupSpreadsheet').timeBased().everyDays(1).atHour(BACKUP_HOUR).create();
 }
 
 // Функции, на которые installTriggers ставит триггеры
-const SCRIPT_TRIGGERS = ['onSheetEdit', 'archivePastApplications'];
+const SCRIPT_TRIGGERS = ['onSheetEdit', 'archivePastApplications', 'backupSpreadsheet'];
 
 // ---------- Перенос заявок в архив ----------
 
@@ -2261,6 +2265,407 @@ function archivePastApplications() {
   } finally {
     lock.releaseLock();
   }
+}
+
+// ---------- Резервные копии ----------
+// Раз в сутки (BACKUP_HOUR, триггер ставит installTriggers) таблица копируется в новую Google Таблицу в папке на Диске
+// владельца скрипта: все листы — значения, формулы, оформление. Скрипт таблицы и его свойства (токен бота) в копию
+// не попадают. Хранятся копии за BACKUP_KEEP_DAYS дней и первая копия каждого месяца — BACKUP_KEEP_MONTHS месяцев;
+// остальные скрипт отправляет в корзину Диска. Папка создаётся при первой копии, её ID — в свойстве скрипта
+// BACKUP_FOLDER_ID, у каждого окружения своя. Других таблиц в эту папку не класть.
+// В копиях ФИО, телефоны и данные об оружии — папку никому не открывать.
+//
+// Восстановление — вручную, в редакторе Apps Script (порядок — README, «Резервные копии»):
+// listBackups → ID копии в RESTORE → restoreCheck (отчёт, ничего не меняет) → restoreApply.
+// Столбцы копии сопоставляются с таблицей по заголовкам, поэтому копия годится и после изменения структуры таблицы:
+// порядок столбцов не важен, новые столбцы остаются пустыми, удалённые не восстанавливаются, переименования —
+// по RENAMED_SHEETS / RENAMED_COLUMNS.
+
+// Час копирования — до переноса заявок в архив (ARCHIVE_HOUR): копия застаёт заявки ещё на месте
+const BACKUP_HOUR = 2;
+const BACKUP_KEEP_DAYS = 30;
+const BACKUP_KEEP_MONTHS = 12;
+// checkSetup предупреждает, если последней копии больше стольких часов
+const BACKUP_MAX_AGE_HOURS = 48;
+const BACKUP_FOLDER_PROPERTY = 'BACKUP_FOLDER_ID';
+// По этой части имени скрипт узнаёт свои копии в папке
+const BACKUP_NAME_MARK = ' — копия ';
+// Сколько действует проверка restoreCheck: restoreApply без свежей проверки тех же настроек не запустится
+const RESTORE_CHECK_SECONDS = 30 * 60;
+
+// Переименования листов и столбцов: восстановление переводит старые названия из копии в новые. Переименовали лист
+// или столбец — добавьте строку «старое → новое» и не удаляйте её: по ней читаются все копии, сделанные раньше.
+// Новый столбец должен работать с пустым значением — у строк из старых копий он будет пустым
+const RENAMED_SHEETS = {
+  // 'Старое название листа': 'Новое название',
+};
+const RENAMED_COLUMNS = {
+  // 'Лист (новое название)': { 'Старый заголовок': 'Новый заголовок' },
+};
+
+// Что восстанавливать — заполняется перед restoreCheck / restoreApply и после восстановления очищается
+const RESTORE = {
+  // ID таблицы-копии: из listBackups или из адреса таблицы (…/spreadsheets/d/<ID>/edit). Подойдёт любая таблица с теми же
+  // листами — например, файл .xlsx, загруженный на Диск и сохранённый как Google Таблица
+  backupId: '',
+  // Листы (названия в таблице сейчас); пусто — все листы копии, кроме служебных (имя начинается с «_»)
+  sheets: [],
+  // Только строки с этими значениями первого столбца (ID спортсмена, № заявки…) на одном листе из sheets: такие строки
+  // заменяются строками копии, остальные не трогаются. Пусто — листы целиком
+  ids: [],
+};
+
+/**
+ * backupSpreadsheet — резервная копия таблицы и удаление устаревших копий.
+ *
+ * Запускает триггер раз в сутки в BACKUP_HOUR (ставит installTriggers); можно запустить и вручную.
+ * Сбой — в «_Журнал», сообщение бота подтверждённым администраторам и письмо Google владельцу о сбое триггера.
+ */
+function backupSpreadsheet() {
+  const ss = spreadsheet_();
+  // Под блокировкой записи копия не застанет запрос приложения посередине (заявка удалена, но ещё не в архиве).
+  // Не дождались блокировки — копируем без неё: копия важнее
+  const lock = LockService.getScriptLock();
+  const locked = lock.tryLock(60000);
+  let file;
+  try {
+    file = makeBackup_(ss, '');
+  } catch (err) {
+    console.error('backupSpreadsheet: ' + err);
+    log_(ss, 'Резервная копия не сделана', { id: '' }, { text: String((err && err.message) || err) });
+    logQuotaError_(err, 'Резервная копия');
+    notifyAdminsBackupFailed_(ss, err);
+    throw err;
+  } finally {
+    if (locked) lock.releaseLock();
+  }
+
+  let removed = [];
+  try {
+    removed = removeOldBackups_(backupFolder_(ss));
+  } catch (err) {
+    console.error('Удаление старых копий: ' + err);
+  }
+  log_(ss, 'Резервная копия', { id: '' }, {
+    text: file.getName() + (locked ? '' : ' (без блокировки записи — сервер был занят)') +
+      (removed.length ? '. Удалены устаревшие: ' + removed.join(', ') : ''),
+  });
+  return file.getId();
+}
+
+/**
+ * listBackups — список копий (новые сверху) с ID для RESTORE.backupId и адрес папки. Ничего не меняет.
+ */
+function listBackups() {
+  const folder = existingBackupFolder_();
+  if (!folder) {
+    console.log('Копий ещё нет: папка создаётся при первой копии (backupSpreadsheet)');
+    return;
+  }
+  const lines = ['Папка: ' + folder.getName() + ' — ' + folder.getUrl()];
+  backupFiles_(folder).forEach(function (b) { lines.push(b.name + '   ID: ' + b.id); });
+  console.log(lines.join('\n'));
+}
+
+/**
+ * restoreCheck — что сделает восстановление по настройкам RESTORE. Ничего не меняет.
+ * Отчёт: какие листы и сколько строк будут заменены, каких столбцов нет в копии или в таблице, какие переименования
+ * учтены. Проверка действует RESTORE_CHECK_SECONDS — за это время можно запустить restoreApply.
+ */
+function restoreCheck() {
+  const ss = spreadsheet_();
+  const plan = restorePlan_(ss, RESTORE);
+  CacheService.getScriptCache().put('restore-checked', JSON.stringify(RESTORE), RESTORE_CHECK_SECONDS);
+  console.log(plan.report.concat(['', 'Если всё верно — запустите restoreApply (в течение ' +
+    Math.round(RESTORE_CHECK_SECONDS / 60) + ' минут, не меняя RESTORE)']).join('\n'));
+  return plan.report;
+}
+
+/**
+ * restoreApply — восстановление по RESTORE. Только после restoreCheck с теми же настройками.
+ *
+ * Сначала — копия текущего состояния таблицы (с пометкой «перед восстановлением»): неудачное восстановление
+ * откатывается ею же. Затем под блокировкой записи строки листов заменяются строками копии. Кэш листов сбрасывается,
+ * память уведомлений восстановленных листов стирается — уведомлений о восстановленных статусах не будет.
+ * Ход — в «_Журнал».
+ */
+function restoreApply() {
+  const cache = CacheService.getScriptCache();
+  if (cache.get('restore-checked') !== JSON.stringify(RESTORE)) {
+    throw new Error('Сначала запустите restoreCheck с теми же настройками RESTORE и проверьте отчёт');
+  }
+  const ss = spreadsheet_();
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(60000)) throw new Error('Сервер занят запросами приложения — повторите через минуту');
+  try {
+    const plan = restorePlan_(ss, RESTORE);
+    const before = makeBackup_(ss, 'перед восстановлением');
+    plan.sheets.forEach(applySheetRestore_);
+    SpreadsheetApp.flush();
+
+    const names = plan.sheets.map(function (p) { return p.sheet.getName(); });
+    names.forEach(forgetSheet_);
+    invalidateSheets_(names.filter(function (name) { return APP_SHEETS.indexOf(name) !== -1; }));
+    forgetNotifications_(names);
+    cache.remove('restore-checked');
+    log_(ss, 'Восстановление из копии', { id: '' }, {
+      text: plan.report.join('\n') + '\nСостояние до восстановления сохранено: ' + before.getName() + ' (ID ' + before.getId() + ')',
+    });
+    console.log('Готово. Состояние до восстановления: ' + before.getName() + ' (ID ' + before.getId() + ')');
+  } catch (err) {
+    console.error('restoreApply: ' + err);
+    throw err;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Копия таблицы в папку копий: новая таблица, в неё — копии всех листов под прежними названиями. label — пометка в имени
+function makeBackup_(ss, label) {
+  const folder = backupFolder_(ss);
+  const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm');
+  const copy = SpreadsheetApp.create(ss.getName() + BACKUP_NAME_MARK + stamp + (label ? ' (' + label + ')' : ''));
+  try {
+    // У новой таблицы один пустой лист — удаляется после копирования (последний лист удалить нельзя), а названия
+    // ставятся после его удаления (у копируемого листа может быть такое же название)
+    const placeholder = copy.getSheets()[0];
+    const copied = ss.getSheets().map(function (sheet) { return { name: sheet.getName(), sheet: sheet.copyTo(copy) }; });
+    copy.deleteSheet(placeholder);
+    copied.forEach(function (c) { c.sheet.setName(c.name); });
+    const file = DriveApp.getFileById(copy.getId());
+    file.setDescription('Резервная копия таблицы «' + ss.getName() + '» (ID ' + ss.getId() + ')');
+    file.moveTo(folder);
+    return file;
+  } catch (err) {
+    // Недоделанная копия не должна остаться в корне Диска и сойти за настоящую
+    try {
+      DriveApp.getFileById(copy.getId()).setTrashed(true);
+    } catch (e) {
+      console.error('Не удалось убрать недоделанную копию: ' + e);
+    }
+    throw err;
+  }
+}
+
+// Папка копий; нет (не создана, удалена, нет доступа) — создаётся новая
+function backupFolder_(ss) {
+  const folder = existingBackupFolder_();
+  if (folder) return folder;
+  const created = DriveApp.createFolder('Резервные копии — ' + ss.getName());
+  PropertiesService.getScriptProperties().setProperty(BACKUP_FOLDER_PROPERTY, created.getId());
+  return created;
+}
+
+function existingBackupFolder_() {
+  const id = PropertiesService.getScriptProperties().getProperty(BACKUP_FOLDER_PROPERTY);
+  if (!id) return null;
+  try {
+    const folder = DriveApp.getFolderById(id);
+    return folder.isTrashed() ? null : folder;
+  } catch (err) {
+    return null;
+  }
+}
+
+// Копии в папке, новые сверху: [{ id, name, created, file }]
+function backupFiles_(folder) {
+  const files = [];
+  const iterator = folder.getFilesByType(MimeType.GOOGLE_SHEETS);
+  while (iterator.hasNext()) {
+    const file = iterator.next();
+    if (file.getName().indexOf(BACKUP_NAME_MARK) === -1) continue;
+    files.push({ id: file.getId(), name: file.getName(), created: file.getDateCreated(), file: file });
+  }
+  return files.sort(function (a, b) { return b.created - a.created; });
+}
+
+// Устаревшие копии — в корзину Диска. Возвращает их имена
+function removeOldBackups_(folder) {
+  return expiredBackups_(backupFiles_(folder), new Date()).map(function (b) {
+    b.file.setTrashed(true);
+    return b.name;
+  });
+}
+
+// Какие копии устарели: младше BACKUP_KEEP_DAYS дней — нужны все; старше — только первая копия месяца,
+// пока ей меньше BACKUP_KEEP_MONTHS месяцев. backups — [{ created }]
+function expiredBackups_(backups, now) {
+  const monthKey = function (date) { return date.getFullYear() * 12 + date.getMonth(); };
+  const firstOfMonth = {};
+  backups.forEach(function (b) {
+    const key = monthKey(b.created);
+    if (!firstOfMonth[key] || b.created < firstOfMonth[key].created) firstOfMonth[key] = b;
+  });
+  const keepAll = shiftDays_(now, -BACKUP_KEEP_DAYS);
+  const keepMonthly = new Date(now.getFullYear(), now.getMonth() - BACKUP_KEEP_MONTHS, now.getDate());
+  return backups.filter(function (b) {
+    if (b.created >= keepAll) return false;
+    return !(firstOfMonth[monthKey(b.created)] === b && b.created >= keepMonthly);
+  });
+}
+
+// Строка отчёта checkSetup о копиях
+function backupReport_() {
+  const folder = existingBackupFolder_();
+  if (!folder) return 'Резервные копии: ⚠ ещё не делались — запустите backupSpreadsheet';
+  const files = backupFiles_(folder);
+  if (!files.length) return 'Резервные копии: ⚠ в папке «' + folder.getName() + '» нет копий — запустите backupSpreadsheet';
+  const latest = files[0].created;
+  const stale = Date.now() - latest.getTime() > BACKUP_MAX_AGE_HOURS * 60 * 60 * 1000;
+  return 'Резервные копии: ' + files.length + ' в папке «' + folder.getName() + '», последняя — ' +
+    Utilities.formatDate(latest, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm') +
+    (stale ? ' ⚠ старше ' + BACKUP_MAX_AGE_HOURS + ' часов — проверьте триггер backupSpreadsheet и «Выполнения»' : '');
+}
+
+// Сбой копии — сообщение подтверждённым администраторам с ChatId. Ошибка отправки не скрывает исходную
+function notifyAdminsBackupFailed_(ss, err) {
+  try {
+    if (!botToken_()) return;
+    const admins = athletesTable_(ss).athletes.filter(function (a) {
+      return a.isAdmin && a.status === ATHLETE_STATUS.confirmed && a.chatId;
+    });
+    const text = 'Резервная копия таблицы не сделана: ' + String((err && err.message) || err) +
+      '\nПодробности — в «' + SHEET.log + '» и в редакторе Apps Script, раздел «Выполнения».';
+    fetchAll_(admins.map(function (a) {
+      const args = telegramRequestArgs_(a.chatId, text);
+      args[1].url = args[0];
+      return args[1];
+    }));
+  } catch (e) {
+    console.error('Не удалось сообщить о сбое копии: ' + e);
+  }
+}
+
+// План восстановления по настройкам options (как RESTORE): { sheets: [план листа], report: [строки отчёта] }.
+// Ничего не меняет; ошибки настроек — исключением
+function restorePlan_(ss, options) {
+  const backupId = String(options.backupId || '').trim();
+  if (!backupId) throw new Error('Не указан RESTORE.backupId — ID копии (см. listBackups)');
+  if (backupId === ss.getId()) throw new Error('RESTORE.backupId — ID самой таблицы, а нужен ID копии');
+  const wanted = options.sheets || [];
+  const ids = (options.ids || []).map(function (id) { return String(id).trim(); }).filter(Boolean);
+  if (ids.length && wanted.length !== 1) throw new Error('RESTORE.ids — только вместе с одним листом в RESTORE.sheets');
+
+  const backup = SpreadsheetApp.openById(backupId);
+  const sources = backup.getSheets().map(function (sheet) {
+    const name = sheet.getName();
+    return { sheet: sheet, name: name, target: RENAMED_SHEETS[name] || name };
+  });
+  const hasSource = function (name) { return sources.some(function (s) { return s.target === name; }); };
+  wanted.forEach(function (name) {
+    if (!hasSource(name)) throw new Error('В копии нет листа «' + name + '»');
+    if (!ss.getSheetByName(name)) throw new Error('В таблице нет листа «' + name + '»');
+  });
+
+  const report = ['Копия: ' + backup.getName() + ' (ID ' + backupId + ')'];
+  const plans = [];
+  sources.forEach(function (source) {
+    const chosen = wanted.length ? wanted.indexOf(source.target) !== -1 : source.target.charAt(0) !== '_';
+    if (!chosen) return;
+    const sheet = ss.getSheetByName(source.target);
+    if (!sheet) {
+      report.push('Лист «' + source.name + '» есть в копии, но нет в таблице — пропущен');
+      return;
+    }
+    plans.push(sheetRestorePlan_(source, sheet, ids, report));
+  });
+  if (!wanted.length) {
+    ss.getSheets().forEach(function (sheet) {
+      const name = sheet.getName();
+      if (name.charAt(0) !== '_' && !hasSource(name)) report.push('Лист «' + name + '» в копии нет — не трогается');
+    });
+  }
+  return { sheets: plans, report: report };
+}
+
+// План одного листа: строки копии, переложенные в столбцы таблицы по заголовкам. Строки отчёта — в report
+function sheetRestorePlan_(source, sheet, ids, report) {
+  const range = source.sheet.getDataRange();
+  const values = range.getValues();
+  const formulas = range.getFormulas();
+  const renames = RENAMED_COLUMNS[sheet.getName()] || {};
+  const renamed = [];
+  const sourceHeaders = (values[0] || []).map(function (h) {
+    const header = String(h).trim();
+    if (!renames[header]) return header;
+    renamed.push('«' + header + '» → «' + renames[header] + '»');
+    return renames[header];
+  });
+  const current = sheet.getDataRange().getValues();
+  const headers = (current[0] || []).map(function (h) { return String(h).trim(); });
+  const from = headers.map(function (h) { return h ? sourceHeaders.indexOf(h) : -1; });
+
+  const title = 'Лист «' + sheet.getName() + '»' + (source.name !== sheet.getName() ? ' (в копии — «' + source.name + '»)' : '');
+  if (!headers.length || from[0] === -1) {
+    throw new Error(title + ': в копии нет первого столбца таблицы «' + (headers[0] || '') + '» — сопоставить строки нельзя');
+  }
+  const isEmpty = function (row) { return row.every(function (cell) { return String(cell).trim() === ''; }); };
+  // Ячейка копии для записи: формула — формулой, текст, похожий на формулу, — текстом
+  const rows = [];
+  for (let r = 1; r < values.length; r++) {
+    if (isEmpty(values[r]) && formulas[r].every(function (f) { return !f; })) continue;
+    if (ids.length && ids.indexOf(String(values[r][from[0]]).trim()) === -1) continue;
+    rows.push(from.map(function (i) {
+      if (i === -1) return '';
+      return formulas[r][i] ? formulas[r][i] : safeCell_(values[r][i]);
+    }));
+  }
+
+  const plan = { sheet: sheet, rows: rows, ids: ids };
+  if (ids.length) {
+    const found = rows.map(function (row) { return String(row[0]).trim(); });
+    const existing = current.slice(1).filter(function (row) { return ids.indexOf(String(row[0]).trim()) !== -1; }).length;
+    const missing = ids.filter(function (id) { return found.indexOf(id) === -1; });
+    report.push(title + ': строк с «' + headers[0] + '» ' + ids.join(', ') + ' — в таблице ' + existing +
+      ', будут заменены ' + rows.length + ' строками копии' + (missing.length ? '; в копии нет: ' + missing.join(', ') : ''));
+  } else {
+    const existing = current.slice(1).filter(function (row) { return !isEmpty(row); }).length;
+    report.push(title + ': строк сейчас ' + existing + ' → будет ' + rows.length + ' из копии');
+  }
+  if (renamed.length) report.push('  переименования: ' + renamed.join(', '));
+  const absent = headers.filter(function (h, j) { return h && from[j] === -1; });
+  if (absent.length) report.push('  в копии нет столбцов: ' + absent.join(', ') + ' — у восстановленных строк будут пустыми');
+  const dropped = sourceHeaders.filter(function (h) { return h && headers.indexOf(h) === -1; });
+  if (dropped.length) report.push('  в таблице нет столбцов копии: ' + dropped.join(', ') + ' — их данные не восстанавливаются');
+  return plan;
+}
+
+// Запись плана листа: целиком — строки данных очищаются и заменяются; по ids — заменяются только строки с этими ID
+function applySheetRestore_(plan) {
+  const sheet = plan.sheet;
+  if (plan.ids.length) {
+    const values = sheet.getDataRange().getValues();
+    const rows = [];
+    for (let r = 1; r < values.length; r++) {
+      if (plan.ids.indexOf(String(values[r][0]).trim()) !== -1) rows.push(r + 1);
+    }
+    deleteRowNumbers_(sheet, rows);
+    writeRows_(sheet, sheet.getLastRow() + 1, plan.rows);
+    return;
+  }
+  const last = sheet.getLastRow();
+  if (last > 1) sheet.getRange(2, 1, last - 1, sheet.getLastColumn()).clearContent();
+  writeRows_(sheet, 2, plan.rows);
+}
+
+// Строки с row-й строки листа как есть (ячейки уже подготовлены: формулы — формулами, остальное — через safeCell_).
+// Строк в сетке не хватает — добавляются
+function writeRows_(sheet, row, rows) {
+  if (!rows.length) return;
+  const missing = row + rows.length - 1 - sheet.getMaxRows();
+  if (missing > 0) sheet.insertRowsAfter(sheet.getMaxRows(), missing);
+  sheet.getRange(row, 1, rows.length, rows[0].length).setValues(rows);
+}
+
+// Память уведомлений (notifyStatusChanges_) листов стирается: следующая правка запомнит текущие статусы без сообщений
+function forgetNotifications_(sheetNames) {
+  const props = PropertiesService.getScriptProperties();
+  Object.keys(props.getProperties()).forEach(function (key) {
+    const forget = sheetNames.some(function (name) {
+      return key.indexOf(notifiedKey_(name, '')) === 0 || key === 'notified-seeded:' + name;
+    });
+    if (forget) props.deleteProperty(key);
+  });
 }
 
 // ---------- Ручные правки таблицы и уведомления в Telegram ----------

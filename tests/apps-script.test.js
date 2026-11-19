@@ -748,6 +748,154 @@ describe('Лимиты Google', () => {
   });
 });
 
+describe('Резервные копии', () => {
+  const backup = () => gas.run().__eval('backupSpreadsheet()');
+  const restore = (fn, options) => gas.run().__eval(`Object.assign(RESTORE, ${JSON.stringify(options)}); ${fn}()`);
+  const events = (name) => (gas.sheet('_Журнал')?.objects() ?? []).filter((r) => r['Событие'] === name);
+  const folderId = () => gas.props.get('BACKUP_FOLDER_ID');
+
+  it('копия — все листы под прежними названиями, с формулами, в своей папке; сделана — в «_Журнал»', () => {
+    const names = gas.spreadsheet.getSheets().map((s) => s.getName());
+    const id = backup();
+    const copy = gas.drive.spreadsheets.get(id);
+    expect(copy.getName()).toMatch(/^Тестовая таблица — копия \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+    expect(copy.getSheets().map((s) => s.getName())).toEqual(names);
+    expect(copy.getSheetByName('Заявки').formulas[1][APPLICATION_HEADERS.indexOf('Примечание')]).toBe('=1+1');
+    expect(gas.drive.filesIn(folderId()).map((f) => f.id)).toEqual([id]);
+    expect(events('Резервная копия')).toHaveLength(1);
+
+    // Вторая копия — в ту же папку
+    backup();
+    expect(gas.drive.filesIn(folderId())).toHaveLength(2);
+  });
+
+  it('хранятся 30 дней и первая копия месяца — 12 месяцев; остальные — в корзину', () => {
+    const now = new Date(2026, 10, 17, 2);
+    const at = (y, m, d) => ({ created: new Date(y, m, d, 2), name: `${y}-${m + 1}-${d}` });
+    const backups = [
+      at(2026, 10, 16), at(2026, 9, 20), // моложе 30 дней — остаются
+      at(2026, 9, 1), at(2026, 9, 15), // старше 30 дней: 1 октября — первая копия месяца, остаётся; 15-го — нет
+      at(2026, 0, 3), at(2026, 0, 9), // январь: остаётся только первая
+      at(2025, 10, 16), at(2025, 10, 20), // ноябрь прошлого года: даже первая старше 12 месяцев
+    ];
+    const expired = gas.run().__eval('expiredBackups_')(backups, now).map((b) => b.name);
+    expect(expired).toEqual(['2026-10-15', '2026-1-9', '2025-11-16', '2025-11-20']);
+  });
+
+  it('устаревшие копии удаляются после новой', () => {
+    const old = gas.drive.files.get(backup());
+    old.created = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000);
+    backup();
+    expect(old.trashed).toBe(true);
+    expect(gas.drive.filesIn(folderId())).toHaveLength(1);
+    expect(events('Резервная копия').at(-1)['Подробности']).toContain('Удалены устаревшие');
+  });
+
+  it('сбой — в «_Журнал» и сообщение подтверждённым администраторам', () => {
+    gas.drive.createError = 'Service invoked too many times';
+    expect(backup).toThrow('too many times');
+    expect(events('Резервная копия не сделана')).toHaveLength(1);
+    const sent = gas.telegram.filter((t) => t.url.endsWith('/sendMessage'));
+    expect(sent.map((t) => t.payload.chat_id)).toEqual(['222']); // Петров; Сидоров — администратор, но не подтверждён
+    expect(sent[0].payload.text).toContain('Резервная копия таблицы не сделана');
+  });
+
+  it('отчёт checkSetup: нет копий — предупреждение; есть — когда последняя', () => {
+    expect(gas.run().__eval('backupReport_()')).toContain('⚠ ещё не делались');
+    backup();
+    const line = gas.run().__eval('backupReport_()');
+    expect(line).toMatch(/^Резервные копии: 1 в папке «Резервные копии — Тестовая таблица», последняя — /);
+    expect(line).not.toContain('⚠');
+  });
+
+  it('восстановление — только после проверки тех же настроек; проверка ничего не меняет', () => {
+    const id = backup();
+    gas.sheet('Оружие').values[1][1] = 'Испорчено';
+    expect(() => restore('restoreApply', { backupId: id })).toThrow('Сначала запустите restoreCheck');
+
+    const report = restore('restoreCheck', { backupId: id });
+    expect(report).toContain('Лист «Оружие»: строк сейчас 2 → будет 2 из копии');
+    expect(report.some((l) => l.startsWith('Лист «_Журнал»'))).toBe(false); // служебные листы — только явно
+    expect(gas.sheet('Оружие').values[1][1]).toBe('Испорчено');
+
+    expect(() => restore('restoreApply', { backupId: id, sheets: ['Оружие'] })).toThrow('Сначала запустите restoreCheck');
+    restore('restoreApply', { backupId: id });
+    expect(gas.sheet('Оружие').values[1][1]).toBe('МР-512');
+  });
+
+  it('восстановление целиком: строки как в копии, формулы — формулами, текст «=…» — текстом; до этого — копия текущего', () => {
+    gas.sheet('Спортсмены').values[1][1] = '=Иванов'; // текст, похожий на формулу (в таблице хранится как текст)
+    const id = backup();
+    post(IVANOV, 'saveApplication', { application: newApplication });
+    post(IVANOV, 'deleteApplication', { number: 5 });
+    gas.props.put('notified:Заявки:7', 'В работе');
+    const generation = gas.cache.get('gen:Заявки');
+
+    restore('restoreCheck', { backupId: id });
+    restore('restoreApply', { backupId: id });
+
+    const applications = gas.sheet('Заявки');
+    expect(applications.objects().map((r) => r['№'])).toEqual([5, 6, 7]);
+    expect(applications.formulas[1][APPLICATION_HEADERS.indexOf('Примечание')]).toBe('=1+1');
+    expect(gas.sheet('Спортсмены').values[1][1]).toBe('=Иванов');
+    expect(gas.sheet('Спортсмены').formulas[1][1]).toBe('');
+    // Архив тоже как в копии — удалённой заявки № 5 там нет
+    expect(gas.sheet('Архив заявок').objects().map((r) => r['№'])).toEqual([9]);
+    expect(gas.cache.get('gen:Заявки')).not.toBe(generation);
+    expect(gas.props.get('notified:Заявки:7')).toBeNull();
+
+    const files = gas.drive.filesIn(folderId());
+    expect(files.at(-1).spreadsheet.getName()).toContain('(перед восстановлением)');
+    expect(files.at(-1).spreadsheet.getSheetByName('Заявки').objects().map((r) => r['№'])).toEqual([6, 7, 10]);
+    expect(events('Восстановление из копии')[0]['Подробности']).toContain('Состояние до восстановления сохранено');
+  });
+
+  it('восстановление строк по ID: заменяются только они, остальное не трогается', () => {
+    const id = backup();
+    post(PETROV, 'adminDeleteAthlete', { athleteId: 'a1' }); // удаляет закрепление a1 и уносит его заявки в архив
+    post(PETROV, 'adminUnassignWeapon', { athleteId: 'a2', weaponId: 'w2' });
+    expect(() => restore('restoreCheck', { backupId: id, ids: ['a1'] })).toThrow('только вместе с одним листом');
+
+    const options = { backupId: id, sheets: ['Спортсмены'], ids: ['a1', 'a9'] };
+    const report = restore('restoreCheck', options);
+    expect(report[1]).toBe('Лист «Спортсмены»: строк с «ID» a1, a9 — в таблице 0, будут заменены 1 строками копии; в копии нет: a9');
+    restore('restoreApply', options);
+
+    expect(gas.sheet('Спортсмены').objects().map((r) => r.ID)).toEqual(['a2', 'a3', 'a4', 'a1']);
+    expect(gas.sheet('Спортсмен/Оружие').objects()).toEqual([]); // этот лист не восстанавливали
+  });
+
+  it('изменённая структура: столбцы по заголовкам, переименования по списку, новые — пустые', () => {
+    const id = backup();
+    // После копии: в «Оружии» столбцы переставили, «Номер» переименовали в «Заводской номер», добавили «Калибр»;
+    // лист «Виды транспорта» переименовали в «Транспорт»
+    gas.spreadsheet.getSheetByName('Оружие').values = [['Ид', 'Калибр', 'Заводской номер', 'Название'], ['w1', '12', '123', 'МР-512']];
+    gas.spreadsheet.getSheetByName('Оружие').formulas = [];
+    gas.spreadsheet.getSheetByName('Виды транспорта').setName('Транспорт');
+    gas.spreadsheet.getSheetByName('Транспорт').values = [['Название'], ['Самолёт']];
+    gas.drive.spreadsheets.get(id).getSheetByName('Оружие').values[0].push('Примечание'); // столбец, которого уже нет
+
+    const renames = `RENAMED_SHEETS['Виды транспорта'] = 'Транспорт'; RENAMED_COLUMNS['Оружие'] = { 'Номер': 'Заводской номер' };`;
+    const options = JSON.stringify({ backupId: id, sheets: ['Оружие', 'Транспорт'] });
+    const report = gas.run().__eval(`${renames} Object.assign(RESTORE, ${options}); restoreCheck()`);
+    expect(report).toEqual([
+      expect.stringContaining('Копия: '),
+      'Лист «Оружие»: строк сейчас 1 → будет 2 из копии',
+      '  переименования: «Номер» → «Заводской номер»',
+      '  в копии нет столбцов: Калибр — у восстановленных строк будут пустыми',
+      '  в таблице нет столбцов копии: Примечание — их данные не восстанавливаются',
+      'Лист «Транспорт» (в копии — «Виды транспорта»): строк сейчас 1 → будет 2 из копии',
+    ]);
+    gas.run().__eval(`${renames} Object.assign(RESTORE, ${options}); restoreApply()`);
+
+    expect(gas.sheet('Оружие').objects()).toEqual([
+      { Ид: 'w1', Калибр: '', 'Заводской номер': '123', Название: 'МР-512' },
+      { Ид: 'w2', Калибр: '', 'Заводской номер': '777', Название: 'Benelli' },
+    ]);
+    expect(gas.sheet('Транспорт').objects().map((r) => r['Название'])).toEqual(['Автомобиль', 'Поезд']);
+  });
+});
+
 describe('Утилиты', () => {
   it('safeCell_ экранирует то, что Таблицы приняли бы за формулу', () => {
     const { safeCell_ } = gas.run();
