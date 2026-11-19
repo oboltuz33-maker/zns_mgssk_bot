@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { SHEET } from '../config.js';
 import {
   ATHLETE_LOCKED_COLUMNS,
@@ -6,6 +6,8 @@ import {
   ATHLETE_STATUSES,
   ATHLETE_YES_NO_COLUMNS,
   assignWeaponTo,
+  athleteProblem,
+  createAthlete,
   deleteAthlete,
   saveAthlete,
   sameWeapon,
@@ -13,6 +15,7 @@ import {
   yesNoValue,
 } from '../data/admin.js';
 import { idColumn, moscowDay } from '../data/model.js';
+import { newRequestId } from '../data/network.js';
 import { withSheetRow, withWeaponLink, withoutAthlete, withoutWeaponLink } from '../data/patches.js';
 import { fuzzySearch } from '../data/search.js';
 import { Badge, CardsOrTable, Chips, EmptyState, FormFooter, ListToolbar, PageHeader, SearchInput } from '../components.jsx';
@@ -68,6 +71,9 @@ export function AdminAthletes({ model, sheets, onOpenPage, onMessage }) {
 
   return (
     <>
+      <button className="primary-button wide-button" onClick={() => onOpenPage('admin-athlete', {})}>
+        ＋ Новый спортсмен
+      </button>
       <Chips
         options={[
           { value: PENDING, label: 'Ждут подтверждения', count: pending.length },
@@ -139,9 +145,12 @@ const NAME_COLUMNS = ['Фамилия', 'Имя', 'Отчество'];
 const NOT_LOGGED_IN_CONFIRM_HINT =
   'Спортсмен ещё не входил в приложение. Он будет подтверждён автоматически, когда войдёт по номеру телефона';
 
-// Правка спортсмена: все столбцы листа, кроме ID, телефона и ChatId. Отправляются только изменённые.
+// Спортсмен: params без id — новый (AthleteCreateForm), { id } — правка (AthleteEditForm)
+export const AdminAthleteForm = (props) => (props.params.id ? <AthleteEditForm {...props} /> : <AthleteCreateForm {...props} />);
+
+// Правка спортсмена: все столбцы листа, кроме ID и ChatId. Отправляются только изменённые.
 // params: { id }
-export function AdminAthleteForm({ model, me, sheets, params, onOpenPage, onMessage }) {
+function AthleteEditForm({ model, me, sheets, params, onOpenPage, onMessage }) {
   const back = () => onOpenPage('admin', { tab: 'athletes' });
   useTelegramBackButton(back);
 
@@ -166,7 +175,17 @@ export function AdminAthleteForm({ model, me, sheets, params, onOpenPage, onMess
   // «Подтвержден» — только входившему в приложение (есть ChatId); уже подтверждённая запись остаётся как есть
   const canConfirm = athlete.hasChatId || initial['Статус'] === ATHLETE_STATUS.confirmed;
   const changed = columns.filter((c) => form[c] !== initial[c]);
-  const problem = !String(form['Фамилия'] ?? '').trim() || !String(form['Имя'] ?? '').trim() ? 'Укажите фамилию и имя' : null;
+  const problem = athleteProblem(
+    model,
+    {
+      lastName: String(form['Фамилия'] ?? ''),
+      firstName: String(form['Имя'] ?? ''),
+      middleName: String(form['Отчество'] ?? ''),
+      // Телефон проверяется, только если его меняли: старый номер из таблицы мог быть записан иначе
+      phone: changed.includes('Телефон') ? String(form['Телефон'] ?? '') : '',
+    },
+    athlete?.id,
+  );
 
   const save = async () => {
     if (problem) return setAttempted(true);
@@ -212,7 +231,10 @@ export function AdminAthleteForm({ model, me, sheets, params, onOpenPage, onMess
   };
 
   const set = (column, value) => setForm((f) => ({ ...f, [column]: value }));
-  const otherColumns = columns.filter((c) => !NAME_COLUMNS.includes(c) && c !== 'Статус' && !ATHLETE_YES_NO_COLUMNS[c]);
+  const otherColumns = columns.filter(
+    (c) => !NAME_COLUMNS.includes(c) && c !== 'Статус' && c !== 'Телефон' && !ATHLETE_YES_NO_COLUMNS[c],
+  );
+  const phoneInvalid = Boolean(attempted && problem && (problem.startsWith('Телефон') || problem.includes('номер')));
   const textField = (column, required) => (
     <label key={column} className="form-field">
       <span>
@@ -220,8 +242,13 @@ export function AdminAthleteForm({ model, me, sheets, params, onOpenPage, onMess
         {required && ' *'}
       </span>
       <input
-        className={attempted && required && !String(form[column]).trim() ? 'sheet-search invalid' : 'sheet-search'}
-        type={isDateCell(source[column]) ? 'date' : 'text'}
+        className={
+          (attempted && required && !String(form[column]).trim()) || (column === 'Телефон' && phoneInvalid)
+            ? 'sheet-search invalid'
+            : 'sheet-search'
+        }
+        type={column === 'Телефон' ? 'tel' : isDateCell(source[column]) ? 'date' : 'text'}
+        placeholder={column === 'Телефон' ? '+7 900 123-45-67' : undefined}
         value={form[column]}
         maxLength={NAME_COLUMNS.includes(column) ? 100 : 500}
         autoComplete="off"
@@ -236,6 +263,14 @@ export function AdminAthleteForm({ model, me, sheets, params, onOpenPage, onMess
 
       <div className="card item-card">
         {NAME_COLUMNS.filter((c) => columns.includes(c)).map((c) => textField(c, c !== 'Отчество'))}
+        {columns.includes('Телефон') && textField('Телефон', false)}
+        {columns.includes('Телефон') && (
+          <div className="item-hint">
+            {athlete.hasChatId
+              ? 'Спортсмен уже входил в приложение — вход идёт по его Telegram, номер на вход не влияет.'
+              : 'По этому номеру спортсмен войдёт в приложение в первый раз.'}
+          </div>
+        )}
         {columns.includes('Статус') && (
           <label className="form-field">
             <span>Статус</span>
@@ -277,7 +312,7 @@ export function AdminAthleteForm({ model, me, sheets, params, onOpenPage, onMess
 
       {otherColumns.length > 0 && <div className="card item-card">{otherColumns.map((c) => textField(c, false))}</div>}
 
-      <div className="item-hint">Телефон и ChatId меняются только в таблице.</div>
+      <div className="item-hint">ChatId меняется только в таблице.</div>
       {!isSelf && (
         <button className="secondary-button danger wide-button" onClick={remove} disabled={busy}>
           🗑 Удалить спортсмена
@@ -440,6 +475,121 @@ export function AdminAthleteWeapons({ model, me, sheets, params, onOpenPage, onM
           onClose={() => setPicking(false)}
         />
       )}
+    </>
+  );
+}
+
+// Новый спортсмен: ФИО, телефон, признаки и прочие столбцы листа (кроме ID, ChatId и статуса). Статус ставит
+// Apps Script — «Добавлен вручную»: спортсмен подтвердится сам, когда войдёт в приложение по этому номеру.
+// После создания открывается его закреплённое оружие — без оружия перевозчик не сможет взять его в заявку
+function AthleteCreateForm({ model, me, sheets, onOpenPage, onMessage }) {
+  const back = () => onOpenPage('admin', { tab: 'athletes' });
+  useTelegramBackButton(back);
+
+  const headers = sheets.data?.sheets?.[SHEET.athletes]?.headers ?? [];
+  const columns = headers.filter((h, i) => i > 0 && h && h !== 'ChatId' && h !== 'Статус');
+  const [form, setForm] = useState(() =>
+    Object.fromEntries(columns.map((c) => [c, ATHLETE_YES_NO_COLUMNS[c] ? ATHLETE_YES_NO_COLUMNS[c].emptyIsYes : ''])),
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [attempted, setAttempted] = useState(false);
+  // Повтор после ошибки связи сервер узнает по requestId и не создаст второго спортсмена; после правки — новый запрос
+  const requestId = useRef(null);
+
+  if (!me?.isAdmin) return <EmptyState icon="🛠" title="Раздел только для администраторов" />;
+
+  const value = (column) => String(form[column] ?? '');
+  const problem = athleteProblem(model, {
+    lastName: value('Фамилия'),
+    firstName: value('Имя'),
+    middleName: value('Отчество'),
+    phone: value('Телефон'),
+  });
+
+  const set = (column, next) => {
+    requestId.current = null;
+    setForm((f) => ({ ...f, [column]: next }));
+  };
+
+  const save = async () => {
+    if (problem) return setAttempted(true);
+    setBusy(true);
+    setError(null);
+    requestId.current ??= newRequestId();
+    try {
+      // Признаки «Да»/«Нет» отправляются только включённые не по умолчанию; пустые поля не отправляются
+      const fields = Object.fromEntries(
+        columns
+          .filter((c) => (ATHLETE_YES_NO_COLUMNS[c] ? form[c] !== ATHLETE_YES_NO_COLUMNS[c].emptyIsYes : value(c).trim()))
+          .map((c) => [c, ATHLETE_YES_NO_COLUMNS[c] ? (form[c] ? 'Да' : 'Нет') : value(c)]),
+      );
+      const result = await createAthlete(fields, requestId.current);
+      if (result.status !== 'success') throw new Error(result.message || 'Не удалось сохранить');
+      sheets.patch((data) => withSheetRow(data, SHEET.athletes, result.row));
+      done();
+      onMessage('Спортсмен добавлен — закрепите за ним оружие');
+      onOpenPage('admin-athlete-weapons', { id: result.athleteId });
+    } catch (e) {
+      console.error(e);
+      setError(e.message || 'Ошибка сети');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const nameInvalid = (column) => attempted && column !== 'Отчество' && !value(column).trim();
+  const textField = (column, { required = false, type = 'text', invalid = false, placeholder } = {}) => (
+    <label key={column} className="form-field">
+      <span>
+        {column}
+        {required && ' *'}
+      </span>
+      <input
+        className={invalid ? 'sheet-search invalid' : 'sheet-search'}
+        type={type}
+        value={value(column)}
+        maxLength={NAME_COLUMNS.includes(column) ? 100 : 500}
+        placeholder={placeholder}
+        autoComplete="off"
+        onChange={(e) => set(column, e.target.value)}
+      />
+    </label>
+  );
+  const otherColumns = columns.filter((c) => !NAME_COLUMNS.includes(c) && c !== 'Телефон' && !ATHLETE_YES_NO_COLUMNS[c]);
+  // Ошибка про телефон: неверный формат или номер уже занят
+  const phoneInvalid = Boolean(attempted && problem && (problem.startsWith('Телефон') || problem.includes('номер')));
+
+  return (
+    <>
+      <PageHeader title="Новый спортсмен" subtitle={`Статус — «${ATHLETE_STATUS.addedManually}»`} />
+
+      <div className="card item-card">
+        {NAME_COLUMNS.filter((c) => columns.includes(c)).map((c) =>
+          textField(c, { required: c !== 'Отчество', invalid: nameInvalid(c) }),
+        )}
+        {columns.includes('Телефон') &&
+          textField('Телефон', { type: 'tel', invalid: phoneInvalid, placeholder: '+7 900 123-45-67' })}
+        <div className="item-hint">
+          Спортсмен подтвердится сам, когда войдёт в приложение по этому номеру. Без номера он сможет участвовать в
+          заявках, но войти в приложение не сможет, пока номер не впишут в таблицу.
+        </div>
+      </div>
+
+      <div className="card item-card">
+        {columns
+          .filter((c) => ATHLETE_YES_NO_COLUMNS[c])
+          .map((c) => (
+            <label key={c} className="switch-row">
+              <span>{ATHLETE_YES_NO_COLUMNS[c].label}</span>
+              <input type="checkbox" className="switch" checked={form[c]} onChange={() => set(c, !form[c])} />
+            </label>
+          ))}
+      </div>
+
+      {otherColumns.length > 0 && <div className="card item-card">{otherColumns.map((c) => textField(c))}</div>}
+
+      <FormFooter error={error} problem={problem} attempted={attempted} busy={busy} onCancel={back} onSave={save} />
     </>
   );
 }

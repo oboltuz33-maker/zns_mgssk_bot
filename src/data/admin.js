@@ -112,7 +112,7 @@ export const ATHLETE_STATUS = {
 export const ATHLETE_STATUSES = Object.values(ATHLETE_STATUS);
 
 // Столбцы, которые меняются только в таблице (кроме ID в первом столбце)
-export const ATHLETE_LOCKED_COLUMNS = ['Телефон', 'ChatId'];
+export const ATHLETE_LOCKED_COLUMNS = ['ChatId'];
 
 // Столбцы «Да» / «Нет». Настройки уведомлений пустым значением включены, признаки — выключены
 export const ATHLETE_YES_NO_COLUMNS = {
@@ -131,6 +131,41 @@ export const yesNoValue = (column, value) => {
 export const saveAthlete = (athleteId, fields) => postAction('adminSaveAthlete', { athleteId, fields });
 
 export const deleteAthlete = (athleteId) => postAction('adminDeleteAthlete', { athleteId });
+
+// Новый спортсмен: fields — { столбец: значение } (ФИО, «Телефон», признаки «Да»/«Нет», прочее). Статус ставит
+// Apps Script — «Добавлен вручную». requestId — один на отправку: повтор после обрыва связи не создаст второго.
+// Ответ: { status, athleteId, row }
+export const createAthlete = (fields, requestId) => postAction('adminCreateAthlete', { fields }, requestId);
+
+// Телефон к виду 7XXXXXXXXXX — как normalizePhone_ в Apps Script
+export const normalizePhone = (value) => {
+  let digits = String(value ?? '').replace(/\D/g, '');
+  if (digits.length === 11 && digits[0] === '8') digits = `7${digits.slice(1)}`;
+  if (digits.length === 10) digits = `7${digits}`;
+  return digits;
+};
+
+const normName = (s) => String(s ?? '').replace(/\s+/g, ' ').trim().toLowerCase().replace(/ё/g, 'е');
+
+// Чего не хватает в форме спортсмена: null — можно сохранять. Те же проверки, что в Apps Script: фамилия и имя,
+// без дублей ФИО (отчество сравнивается, если указано у обоих) и телефона, телефон — 11 цифр с 7 или пусто.
+// exceptId — правка: сам спортсмен дублем не считается
+export function athleteProblem(model, { lastName, firstName, middleName, phone }, exceptId = '') {
+  if (!lastName.trim() || !firstName.trim()) return 'Укажите фамилию и имя';
+  const namesake = model.athletes.find(
+    (a) =>
+      a.id !== exceptId &&
+      normName(a.lastName) === normName(lastName) &&
+      normName(a.firstName) === normName(firstName) &&
+      (!normName(a.middleName) || !normName(middleName) || normName(a.middleName) === normName(middleName)),
+  );
+  if (namesake) return `${namesake.fullName} уже есть в списке`;
+  if (!phone.trim()) return null;
+  const digits = normalizePhone(phone);
+  if (!/^7\d{10}$/.test(digits)) return 'Телефон: 11 цифр, например +7 900 123-45-67';
+  const owner = model.athletes.find((a) => a.id !== exceptId && a.phone && normalizePhone(a.phone) === digits);
+  return owner ? `Этот номер уже указан у спортсмена ${owner.fullName}` : null;
+}
 
 // ---------- Соревнования ----------
 

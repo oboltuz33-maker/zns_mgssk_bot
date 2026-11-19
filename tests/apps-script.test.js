@@ -735,8 +735,64 @@ describe('Администрирование: спортсмены', () => {
     expect(gas.sheet('Спортсмены').formulas[4][10]).toBe('');
   });
 
-  it('телефон, ChatId и ID не меняются; значения проверяются; дубли ФИО не допускаются', () => {
-    expect(save('a4', { Телефон: '79000000000' }).message).toContain('только в таблице');
+  describe('создание', () => {
+    const create = (fields, user = PETROV) => post(user, 'adminCreateAthlete', { fields });
+
+    it('новая строка со статусом «Добавлен вручную»; войдёт по номеру — подтвердится сам', () => {
+      const result = create({ Фамилия: ' Новиков ', Имя: 'Ник', Телефон: '8 (900) 777-66-55', Перевозчик: 'Да', Паспорт: '=1+1' });
+      expect(result.status).toBe('success');
+      expect(result.row).toMatchObject({ ID: result.athleteId, Фамилия: 'Новиков', Статус: 'Добавлен вручную', Перевозчик: 'Да' });
+      const row = athleteRow(result.athleteId);
+      expect(row).toMatchObject({ Фамилия: 'Новиков', Имя: 'Ник', Телефон: '79007776655', Статус: 'Добавлен вручную', ChatId: '' });
+      expect(row['Паспорт']).toBe('=1+1'); // формула — текстом
+      expect(gas.sheet('_Журнал').objects().some((r) => r['Событие'] === 'Спортсмен создан')).toBe(true);
+      expect(messages()).toHaveLength(0);
+    });
+
+    it('без телефона и признаков: «Перевозчик» — «Нет»', () => {
+      const result = create({ Фамилия: 'Новиков', Имя: 'Ник' });
+      expect(athleteRow(result.athleteId)).toMatchObject({ Телефон: '', Перевозчик: 'Нет', Статус: 'Добавлен вручную' });
+    });
+
+    it('проверки: ФИО, дубли ФИО и телефона, формат телефона, статус, ChatId, права', () => {
+      const count = () => gas.sheet('Спортсмены').objects().length;
+      const before = count();
+      expect(create({ Фамилия: 'Новиков' }).message).toContain('фамилию и имя');
+      expect(create({ Фамилия: 'иванов', Имя: 'Иван' }).message).toContain('уже есть в списке');
+      expect(create({ Фамилия: 'Новиков', Имя: 'Ник', Телефон: '+7 900 111-11-11' }).message).toContain('Иванов Иван Иванович');
+      expect(create({ Фамилия: 'Новиков', Имя: 'Ник', Телефон: '12345' }).message).toContain('11 цифр');
+      expect(create({ Фамилия: 'Новиков', Имя: 'Ник', Статус: 'Подтвержден' }).message).toContain('Добавлен вручную');
+      expect(create({ Фамилия: 'Новиков', Имя: 'Ник', ChatId: '5' }).message).toContain('только в таблице');
+      expect(create({ Фамилия: 'Новиков', Имя: 'Ник' }, IVANOV).status).toBe('error');
+      expect(count()).toBe(before);
+    });
+
+    it('повтор с тем же requestId не создаёт второго', () => {
+      const body = { action: 'adminCreateAthlete', initData: initDataFor(PETROV), requestId: 'a-1', fields: { Фамилия: 'Новиков', Имя: 'Ник' } };
+      const first = gas.post(body);
+      expect(gas.post(body)).toEqual(first);
+      expect(gas.sheet('Спортсмены').objects().filter((r) => r['Фамилия'] === 'Новиков')).toHaveLength(1);
+    });
+  });
+
+  it('телефон меняется: к виду 7XXXXXXXXXX, без дублей, можно очистить; по новому номеру — вход', () => {
+    expect(save('a4', { Телефон: '8 (900) 000-00-00' }).status).toBe('success');
+    expect(athleteRow('a4')['Телефон']).toBe('79000000000');
+    expect(save('a4', { Телефон: '+7 900 111-11-11' }).message).toContain('Иванов Иван Иванович');
+    expect(save('a4', { Телефон: '12345' }).message).toContain('11 цифр');
+    // Свой же номер дублем не считается
+    expect(save('a4', { Телефон: '79000000000', Паспорт: '1' }).status).toBe('success');
+    expect(save('a4', { Телефон: '' }).status).toBe('success');
+    expect(athleteRow('a4')['Телефон']).toBe('');
+
+    // Ещё не входивший спортсмен входит по новому номеру, по старому — нет
+    save('a4', { Телефон: '79000000000' });
+    const user = { id: 444, first_name: 'Кузьма' };
+    expect(post(user, 'linkPhone', { contact: contactFor(444, '79004444444') }).status).not.toBe('success');
+    expect(post(user, 'linkPhone', { contact: contactFor(444, '79000000000') })).toMatchObject({ status: 'success', athleteId: 'a4' });
+  });
+
+  it('ChatId и ID не меняются; значения проверяются; дубли ФИО не допускаются', () => {
     expect(save('a4', { ChatId: '1' }).message).toContain('только в таблице');
     expect(save('a4', { ID: 'x' }).message).toContain('только в таблице');
     expect(save('a4', { Статус: 'Заблокирован' }).message).toContain('Неизвестный статус');

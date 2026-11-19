@@ -38,7 +38,10 @@
  * POST { action: 'adminExportApplications', initData, from?, to? }
  *      Выгрузка «Заявок» в .xlsx с отбором по срокам ЕКП («гггг-мм-дд») — бот присылает файл в чат.
  * POST { action: 'adminSaveAthlete', initData, athleteId, fields: { столбец: значение } }
- *      Правка спортсмена (кроме ID, телефона и ChatId), в том числе подтверждение (Статус = «Подтвержден»).
+ *      Правка спортсмена (кроме ID и ChatId), в том числе подтверждение (Статус = «Подтвержден»). Телефон — без дублей.
+ * POST { action: 'adminCreateAthlete', initData, fields: { столбец: значение } }
+ *      Новый спортсмен: ФИО, телефон (необязательно, без дублей), признаки и прочие столбцы, кроме ID, ChatId и статуса.
+ *      Статус — «Добавлен вручную»: подтвердится сам, когда спортсмен войдёт по номеру телефона.
  * POST { action: 'adminDeleteAthlete', initData, athleteId }
  *      Удаление спортсмена: его закрепления удаляются, его заявки переносятся в «Архив заявок» с прежним статусом.
  * POST { action: 'adminSaveCompetition', initData, competition: { id?, title, ekpNumber, kind, start, end, address,
@@ -226,7 +229,7 @@ const ATHLETE_STATUSES = [ATHLETE_STATUS.confirmed, ATHLETE_STATUS.pending, ATHL
 
 // Столбцы «Спортсменов», которые администратор не меняет в приложении (кроме ID в первом столбце): телефон и ChatId
 // связывают запись с аккаунтом Telegram — их правят только в таблице
-const ATHLETE_LOCKED_COLUMNS = [ATHLETE_COLUMN.phone, ATHLETE_COLUMN.chatId];
+const ATHLETE_LOCKED_COLUMNS = [ATHLETE_COLUMN.chatId];
 
 // Столбцы «Спортсменов» со значениями «Да» / «Нет»
 const ATHLETE_YES_NO_COLUMNS = [ATHLETE_COLUMN.carrier, ATHLETE_COLUMN.admin, ATHLETE_COLUMN.notifyCompetitions, ATHLETE_COLUMN.notifyApplications];
@@ -310,6 +313,7 @@ const WRITES_SHEETS = {
   adminSetApplicationStatus: [SHEET.applications],
   adminSaveApplication: [SHEET.applications],
   adminSaveAthlete: [SHEET.athletes],
+  adminCreateAthlete: [SHEET.athletes],
   adminDeleteAthlete: [SHEET.athletes, SHEET.athleteWeapons, SHEET.applications],
   adminSaveCompetition: [SHEET.competitions],
   adminSaveWeapon: [SHEET.weapons],
@@ -430,6 +434,7 @@ function runAction_(user, body) {
   if (body.action === 'adminSaveApplication') return adminSaveApplication_(user, body.application || {});
   if (body.action === 'adminExportApplications') return adminExportApplications_(user, body);
   if (body.action === 'adminSaveAthlete') return adminSaveAthlete_(user, body);
+  if (body.action === 'adminCreateAthlete') return adminCreateAthlete_(user, body);
   if (body.action === 'adminDeleteAthlete') return adminDeleteAthlete_(user, body);
   if (body.action === 'adminSaveCompetition') return adminSaveCompetition_(user, body.competition || {});
   if (body.action === 'adminSaveWeapon') return adminSaveWeapon_(user, body.weapon || {});
@@ -1320,8 +1325,10 @@ function adminExportApplications_(user, input) {
 // ---------- Администрирование: спортсмены ----------
 
 // Правка спортсмена: input — { athleteId, fields: { столбец: значение } } (только изменённые столбцы).
-// Менять можно все столбцы, кроме ID, телефона и ChatId (ATHLETE_LOCKED_COLUMNS). Статус — из ATHLETE_STATUSES,
+// Менять можно все столбцы, кроме ID и ChatId (ATHLETE_LOCKED_COLUMNS). Статус — из ATHLETE_STATUSES,
 // «Перевозчик», «Администратор» и настройки уведомлений — «Да» / «Нет», ФИО — без дублей (как при заявке на доступ),
+// телефон — без дублей (по нему спортсмен, ещё не входивший в приложение, привязывается при первом входе;
+// у входившего вход идёт по ChatId и от номера не зависит),
 // ячейка-дата — датой («гггг-мм-дд»), прочее — текстом. Себе нельзя снять признак администратора и сменить статус —
 // иначе пропадёт доступ. Статус сменили на «Подтвержден» — спортсмену сообщение бота, как при ручной правке
 function adminSaveAthlete_(user, input) {
@@ -1334,29 +1341,7 @@ function adminSaveAthlete_(user, input) {
 
   const table = readTable_(ss, SHEET.athletes);
   const fresh = freshRow_(table, findById_(table, id), id);
-  const changes = input.fields || {};
-  const fields = {};
-  Object.keys(changes).forEach(function (column) {
-    const i = table.headers.indexOf(column);
-    if (i === -1) throw userError_('Нет столбца «' + column + '» на листе «' + SHEET.athletes + '»');
-    if (i === 0 || ATHLETE_LOCKED_COLUMNS.indexOf(column) !== -1) throw userError_('Столбец «' + column + '» меняется только в таблице');
-    const raw = changes[column];
-    if (column === ATHLETE_COLUMN.status) {
-      const status = String(raw || '').trim();
-      if (ATHLETE_STATUSES.indexOf(status) === -1) throw userError_('Неизвестный статус «' + status + '»');
-      fields[column] = status;
-    } else if (ATHLETE_YES_NO_COLUMNS.indexOf(column) !== -1) {
-      const value = String(raw || '').trim();
-      if (value !== 'Да' && value !== 'Нет') throw userError_('«' + column + '»: допустимо «Да» или «Нет»');
-      fields[column] = value;
-    } else if ([ATHLETE_COLUMN.lastName, ATHLETE_COLUMN.firstName, ATHLETE_COLUMN.middleName].indexOf(column) !== -1) {
-      fields[column] = cleanName_(raw);
-    } else if (fresh.values[i] instanceof Date) {
-      fields[column] = inputDate_(raw, column);
-    } else {
-      fields[column] = String(raw === null || raw === undefined ? '' : raw).replace(/\r\n?/g, '\n').trim().slice(0, TEXT_MAX_LENGTH);
-    }
-  });
+  const fields = athleteInputFields_(table, input.fields || {}, function (i) { return fresh.values[i] instanceof Date; });
   if (!Object.keys(fields).length) throw userError_('Нечего сохранять');
 
   const name = function (column, current) { return fields.hasOwnProperty(column) ? fields[column] : current; };
@@ -1366,6 +1351,7 @@ function adminSaveAthlete_(user, input) {
   if (!lastName || !firstName) throw userError_('Укажите фамилию и имя');
   const namesake = findAthlete_(athletes, function (a) { return a.id !== id && sameName_(a, lastName, firstName, middleName); });
   if (namesake) throw userError_('Спортсмен ' + namesake.fullName + ' уже есть в списке — дубли недопустимы');
+  if (fields[ATHLETE_COLUMN.phone]) requireFreePhone_(athletes, fields[ATHLETE_COLUMN.phone], id);
 
   // Подтверждённых записей без ChatId быть не должно: внесённый заранее подтверждается сам, когда войдёт по номеру.
   // Уже подтверждённую запись без ChatId (из таблицы) править можно
@@ -1396,6 +1382,91 @@ function adminSaveAthlete_(user, input) {
     sendAccessConfirmed_(ss, findAthlete_(athletesTable_(ss), function (a) { return a.id === id; }));
   }
   return { status: 'success', athleteId: id, row: rowObject_(table.headers, values) };
+}
+
+// Значения столбцов «Спортсменов» из формы администратора: changes — { столбец: значение }. Статус — из ATHLETE_STATUSES,
+// «Перевозчик», «Администратор» и настройки уведомлений — «Да» / «Нет», ФИО — без лишних пробелов, ячейка-дата
+// (isDate(индекс столбца)) — датой «гггг-мм-дд», телефон — к виду 7XXXXXXXXXX (пусто — можно), прочее — текстом.
+// ID и ChatId не принимаются. Дубли ФИО и телефона проверяет вызывающий
+function athleteInputFields_(table, changes, isDate) {
+  const fields = {};
+  Object.keys(changes).forEach(function (column) {
+    const i = table.headers.indexOf(column);
+    if (i === -1) throw userError_('Нет столбца «' + column + '» на листе «' + SHEET.athletes + '»');
+    if (i === 0 || ATHLETE_LOCKED_COLUMNS.indexOf(column) !== -1) throw userError_('Столбец «' + column + '» меняется только в таблице');
+    const raw = changes[column];
+    if (column === ATHLETE_COLUMN.status) {
+      const status = String(raw || '').trim();
+      if (ATHLETE_STATUSES.indexOf(status) === -1) throw userError_('Неизвестный статус «' + status + '»');
+      fields[column] = status;
+    } else if (ATHLETE_YES_NO_COLUMNS.indexOf(column) !== -1) {
+      const value = String(raw || '').trim();
+      if (value !== 'Да' && value !== 'Нет') throw userError_('«' + column + '»: допустимо «Да» или «Нет»');
+      fields[column] = value;
+    } else if ([ATHLETE_COLUMN.lastName, ATHLETE_COLUMN.firstName, ATHLETE_COLUMN.middleName].indexOf(column) !== -1) {
+      fields[column] = cleanName_(raw);
+    } else if (column === ATHLETE_COLUMN.phone) {
+      const phone = String(raw || '').trim() ? normalizePhone_(raw) : '';
+      if (phone && !/^7\d{10}$/.test(phone)) throw userError_('Телефон: нужен российский номер из 11 цифр, например +7 900 123-45-67');
+      fields[column] = phone;
+    } else if (isDate(i)) {
+      fields[column] = inputDate_(raw, column);
+    } else {
+      fields[column] = String(raw === null || raw === undefined ? '' : raw).replace(/\r\n?/g, '\n').trim().slice(0, TEXT_MAX_LENGTH);
+    }
+  });
+  return fields;
+}
+
+// Номер phone (7XXXXXXXXXX) не указан ни у кого, кроме спортсмена exceptId; иначе — ошибка с именем владельца
+function requireFreePhone_(athletes, phone, exceptId) {
+  const owner = findAthlete_(athletes, function (a) { return a.id !== exceptId && normalizePhone_(a.phone) === phone; });
+  if (owner) throw userError_('Номер ' + formatPhone_(phone) + ' уже указан у спортсмена ' + owner.fullName);
+}
+
+// Новый спортсмен из приложения: input — { fields: { столбец: значение } } — те же столбцы, что при правке
+// (athleteInputFields_), без статуса; «Телефон» необязательный. Статус — «Добавлен вручную»: спортсмен
+// подтвердится сам, когда войдёт в приложение по этому номеру. Дубли ФИО и телефона не допускаются.
+// Ответ — { status, athleteId, row }
+function adminCreateAthlete_(user, input) {
+  const ss = spreadsheet_();
+  const athletes = athletesTable_(ss);
+  const admin = requireAdmin_(ss, user, athletes);
+  const table = readTable_(ss, SHEET.athletes);
+  const source = input.fields || {};
+  const changes = {};
+  Object.keys(source).forEach(function (column) {
+    if (column === ATHLETE_COLUMN.status) {
+      throw userError_('Новому спортсмену статус ставится сам — «' + ATHLETE_STATUS.addedManually + '»');
+    }
+    changes[column] = source[column];
+  });
+  const fields = athleteInputFields_(table, changes, function () { return false; });
+
+  const lastName = fields[ATHLETE_COLUMN.lastName] || '';
+  const firstName = fields[ATHLETE_COLUMN.firstName] || '';
+  const middleName = fields[ATHLETE_COLUMN.middleName] || '';
+  if (!lastName || !firstName) throw userError_('Укажите фамилию и имя');
+  const namesake = findAthlete_(athletes, function (a) { return sameName_(a, lastName, firstName, middleName); });
+  if (namesake) throw userError_('Спортсмен ' + namesake.fullName + ' уже есть в списке — дубли недопустимы');
+
+  if (fields[ATHLETE_COLUMN.phone]) requireFreePhone_(athletes, fields[ATHLETE_COLUMN.phone], '');
+  fields[ATHLETE_COLUMN.status] = ATHLETE_STATUS.addedManually;
+  if (athletes.has(ATHLETE_COLUMN.carrier) && !fields.hasOwnProperty(ATHLETE_COLUMN.carrier)) fields[ATHLETE_COLUMN.carrier] = 'Нет';
+
+  const id = newId_();
+  athletes.append(id, fields);
+  log_(ss, 'Спортсмен создан', user, {
+    athleteId: id,
+    phone: fields[ATHLETE_COLUMN.phone] || '',
+    text: [lastName, firstName, middleName].filter(Boolean).join(' ') + '. Добавил: ' + admin.fullName,
+  });
+
+  SpreadsheetApp.flush();
+  forgetSheet_(SHEET.athletes);
+  const saved = readTable_(ss, SHEET.athletes);
+  const row = findById_(saved, id);
+  return { status: 'success', athleteId: id, row: row ? rowObject_(saved.headers, row.values) : null };
 }
 
 // Удаление спортсмена: его закрепления оружия удаляются, его заявки (CreatedBy) переносятся в «Архив заявок»

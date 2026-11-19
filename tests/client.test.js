@@ -31,6 +31,8 @@ import {
   competitionDraft,
   competitionProblem,
   inEkpPeriod,
+  athleteProblem,
+  normalizePhone,
   nextStatuses,
   sameWeapon,
   weaponProblem,
@@ -431,6 +433,24 @@ describe('Администрирование: спортсмены, соревн
     expect(weaponProblem(model, { id: '', title: 'Benelli', number: '123' })).toBeNull();
     expect(weaponProblem(model, { id: '', title: 'beretta', number: '123' })).toContain('уже есть');
     expect(weaponProblem(model, { id: '', title: 'Новое', number: ' ' })).toContain('номер');
+  });
+
+  it('спортсмен: ФИО обязательны, без дублей ФИО и телефона, телефон — 11 цифр; при правке сам себе не дубль', () => {
+    const form = { lastName: 'Новиков', firstName: 'Ник', middleName: '', phone: '' };
+    expect(normalizePhone('8 (900) 111-11-11')).toBe('79001111111');
+    expect(normalizePhone('9001111111')).toBe('79001111111');
+    expect(athleteProblem(model, form)).toBeNull();
+    expect(athleteProblem(model, { ...form, firstName: ' ' })).toContain('фамилию и имя');
+    // Отчество не указано у одного из двоих — тот же человек
+    expect(athleteProblem(model, { ...form, lastName: 'иванов', firstName: 'Иван' })).toContain('уже есть');
+    expect(athleteProblem(model, { ...form, lastName: 'Иванов', firstName: 'Иван', middleName: 'Петрович' })).toBeNull();
+    expect(athleteProblem(model, { ...form, phone: '+7 900 111-11-11' })).toContain('Иванов Иван Иванович');
+    expect(athleteProblem(model, { ...form, phone: '123' })).toContain('11 цифр');
+    expect(athleteProblem(model, { ...form, phone: '+7 900 555-55-55' })).toBeNull();
+    const me = { lastName: 'Иванов', firstName: 'Иван', middleName: 'Иванович', phone: '89001111111' };
+    expect(athleteProblem(model, me)).toContain('уже есть');
+    expect(athleteProblem(model, me, 'a1')).toBeNull();
+    expect(athleteProblem(model, { ...me, phone: '' }, 'a1')).toBeNull();
   });
 
   it('черновик соревнования: даты — «гггг-мм-дд»; проверка названия и порядка дат', () => {
