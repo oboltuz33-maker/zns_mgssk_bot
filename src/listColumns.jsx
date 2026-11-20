@@ -22,7 +22,7 @@ const status = { key: 'status', label: 'Статус', value: (a) => a.status, r
 // «Мои заявки»
 export const MY_APPLICATION_COLUMNS = [number, competition, { ...ekp, wide: true }, status];
 
-// Все заявки в «Админ»
+// Все заявки в «Админ» и «Заявки с моим участием» — в обоих нужен перевозчик
 export const ADMIN_APPLICATION_COLUMNS = [
   number,
   { key: 'author', label: 'Перевозчик', value: (a) => a.fullName, render: (a) => shortName(a.fullName) || '—' },
@@ -30,6 +30,7 @@ export const ADMIN_APPLICATION_COLUMNS = [
   { ...ekp, wide: true },
   status,
 ];
+export const PARTICIPANT_APPLICATION_COLUMNS = ADMIN_APPLICATION_COLUMNS;
 
 // Соревнования — в разделе и в «Админ»
 export const COMPETITION_COLUMNS = [
