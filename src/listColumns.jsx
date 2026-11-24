@@ -39,7 +39,7 @@ export const COMPETITION_COLUMNS = [
   { key: 'kind', label: 'Вид', value: (c) => c.kind, wide: true },
   {
     key: 'oneDay',
-    label: 'Одним днём',
+    label: 'Выезд одним днём',
     value: (c) => (c.oneDay ? 'Да' : 'Нет'),
     render: (c) => (c.oneDay ? <Badge tone="accent">Да</Badge> : 'Нет'),
     wide: true,

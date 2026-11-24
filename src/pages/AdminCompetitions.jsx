@@ -67,7 +67,7 @@ export function AdminCompetitions({ model, onOpenPage }) {
             <div className="item-tags">
               {c.kind && <Badge>{c.kind}</Badge>}
               {c.ekpNumber && <Badge>ЕКП № {c.ekpNumber}</Badge>}
-              {c.oneDay && <Badge tone="accent">Одним днём</Badge>}
+              {c.oneDay && <Badge tone="accent">Выезд одним днём</Badge>}
             </div>
             <div className="card-actions">
               <button className="secondary-button" onClick={() => onOpenPage('admin-competition', { id: c.id })}>

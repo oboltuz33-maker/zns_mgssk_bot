@@ -370,7 +370,7 @@ function CompetitionStep({ draft, model, me, update, next }) {
             <div className="item-tags">
               {c.kind && <Badge>{c.kind}</Badge>}
               {c.ekpNumber && <Badge>ЕКП № {c.ekpNumber}</Badge>}
-              {c.oneDay && <Badge tone="accent">Одним днём</Badge>}
+              {c.oneDay && <Badge tone="accent">Выезд одним днём</Badge>}
               {existing.map((a) => (
                 <Badge key={a.number} tone="warning">
                   Уже есть заявка № {a.number}

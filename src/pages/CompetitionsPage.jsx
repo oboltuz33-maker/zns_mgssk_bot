@@ -30,7 +30,7 @@ function CompetitionCard({ competition, onApply, existing = [], onOpenApplicatio
       <div className="item-tags">
         {competition.kind && <Badge>{competition.kind}</Badge>}
         {competition.ekpNumber && <Badge>ЕКП № {competition.ekpNumber}</Badge>}
-        {competition.oneDay && <Badge tone="accent">Одним днём</Badge>}
+        {competition.oneDay && <Badge tone="accent">Выезд одним днём</Badge>}
       </div>
       {existing.length > 0 ? (
         <div className="card-actions">
